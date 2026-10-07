@@ -2,5 +2,6 @@
 
 pub mod bloom;
 pub mod colorize;
+pub mod composite;
 pub mod feedback;
 pub mod warp;
