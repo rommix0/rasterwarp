@@ -29,8 +29,9 @@ All of these were found while compiling and running a throwaway prototype of thi
 2. **Uniform packing lives in each pass module**, next to the WGSL struct it must match, rather than in `params.rs`. `params.rs` holds only the parameters and their ranges.
 3. **Surface status handling follows wgpu 30's `CurrentSurfaceTexture`**: `Timeout`/`Occluded` skip the frame, `Outdated`/`Lost` reconfigure and skip, `Validation` logs and skips. wgpu 30 has no out-of-memory surface status.
 4. **The swapchain is non-sRGB** (egui-wgpu requires that). The composite pass draws through an sRGB *view* of the same texture (`view_formats`), so its linear output is still encoded correctly.
-5. **Present mode is Mailbox when available** (Fifo otherwise), so the frame-time readout shows the real render cost instead of being locked to vsync.
+5. **Present mode is Fifo (vsync) by default**, which keeps the spec's per-frame feedback semantics at the 60 fps target. Setting `RASTERWARP_UNCAPPED=1` switches to Mailbox when available, so the frame-time readout shows the real render cost for performance checks.
 6. **Each pass also has a GPU test** that builds its pipeline (wgpu validates the WGSL against the bind group layout), in addition to the end-to-end smoke test.
+7. **Feedback combines frames with `max(current, previous * amount)`** instead of the spec's `mix`, so the live image is never dimmed and trails fade without washing out.
 
 ## File Structure
 
