@@ -2,6 +2,9 @@
 //! offscreen, and read results back. wgpu validation errors panic, failing the test.
 
 use rasterwarp::blend::FrameParams;
+use rasterwarp::capture::encode::VideoFormat;
+use rasterwarp::capture::recorder::{RecordSettings, Recorder};
+use rasterwarp::capture::{CaptureMode, OFFLINE_STEP};
 use rasterwarp::gpu;
 use rasterwarp::motion::{Mode, Motion};
 use rasterwarp::params::Params;
@@ -115,6 +118,113 @@ fn renders_the_preview_offscreen() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device");
+}
+
+#[test]
+fn records_every_frame_offline() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let folder = std::env::temp_dir().join(format!("rasterwarp-smoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let settings = RecordSettings {
+        format: VideoFormat::Ffv1,
+        mode: CaptureMode::Offline,
+        folder: folder.clone(),
+        stop_after: 10.0 / 60.0,
+    };
+    let canvas = (256, 144);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, canvas, &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut recorder = Recorder::start(&device, &settings, canvas, 0.0).expect("start recording");
+    let mut time = 0.0;
+    while !recorder.finished_recording() {
+        recorder.pump(&device).expect("encoder running");
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &frame_params,
+            time as f32,
+            &output.view,
+            (OUT_W, OUT_H),
+        );
+        recorder
+            .capture(&device, &mut encoder, time, |encoder, view| {
+                renderer.composite_capture(
+                    &device,
+                    &queue,
+                    encoder,
+                    &frame_params,
+                    time as f32,
+                    view,
+                )
+            })
+            .expect("capture");
+        queue.submit([encoder.finish()]);
+        recorder.after_submit();
+        time += f64::from(OFFLINE_STEP);
+    }
+    let status = recorder.finish(&device).expect("finish recording");
+    assert_eq!(status.frames, 10);
+    assert_eq!(status.dropped, 0);
+    assert!(status.path.starts_with(&folder));
+    assert!(std::fs::metadata(&status.path).expect("file written").len() > 0);
+}
+
+#[test]
+fn real_time_capture_counts_frames_it_has_to_drop() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let folder = std::env::temp_dir().join(format!("rasterwarp-drops-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let settings = RecordSettings {
+        format: VideoFormat::Ffv1,
+        mode: CaptureMode::RealTime,
+        folder,
+        stop_after: 0.0,
+    };
+    let canvas = (256, 144);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, canvas, &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut recorder = Recorder::start(&device, &settings, canvas, 0.0).expect("start recording");
+    // Five frames, but the readbacks aren't started until the end, so the three staging
+    // buffers fill up and the last two frames are dropped.
+    for frame in 0..5 {
+        let time = f64::from(frame) / 60.0;
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &frame_params,
+            time as f32,
+            &output.view,
+            (OUT_W, OUT_H),
+        );
+        recorder
+            .capture(&device, &mut encoder, time, |encoder, view| {
+                renderer.composite_capture(
+                    &device,
+                    &queue,
+                    encoder,
+                    &frame_params,
+                    time as f32,
+                    view,
+                )
+            })
+            .expect("capture");
+        queue.submit([encoder.finish()]);
+    }
+    recorder.after_submit();
+    let status = recorder.finish(&device).expect("finish recording");
+    assert_eq!((status.frames, status.dropped), (3, 2));
 }
 
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding

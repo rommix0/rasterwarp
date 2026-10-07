@@ -9,6 +9,9 @@ pub mod warp;
 use crate::blend::FrameParams;
 use crate::source::{self, GrayImage};
 
+/// The format of the capture texture that recordings are read from.
+pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 pub struct Renderer {
     size: (u32, u32),
     source: wgpu::TextureView,
@@ -18,6 +21,8 @@ pub struct Renderer {
     feedback: feedback::FeedbackPass,
     bloom: bloom::BloomPass,
     composite: composite::CompositePass,
+    /// Draws the same composite into a canvas-sized capture texture.
+    capture: composite::CompositePass,
 }
 
 impl Renderer {
@@ -40,6 +45,7 @@ impl Renderer {
             feedback: feedback::FeedbackPass::new(device, w, h),
             bloom: bloom::BloomPass::new(device, w, h),
             composite: composite::CompositePass::new(device, output_format),
+            capture: composite::CompositePass::new(device, CAPTURE_FORMAT),
         }
     }
 
@@ -122,6 +128,35 @@ impl Renderer {
                 self.size,
                 output_size,
                 self.composite.encode_srgb(),
+            ),
+        );
+    }
+
+    /// Draws this frame's composite again into `output`: a canvas-sized texture in
+    /// [`CAPTURE_FORMAT`], with no letterboxing and no UI. Call after `render`, in the
+    /// same encoder.
+    pub fn composite_capture(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameParams,
+        time: f32,
+        output: &wgpu::TextureView,
+    ) {
+        self.capture.render(
+            device,
+            queue,
+            encoder,
+            self.feedback.output(),
+            self.bloom.output(),
+            output,
+            &composite::uniforms(
+                &frame.glow,
+                time,
+                self.size,
+                self.size,
+                self.capture.encode_srgb(),
             ),
         );
     }

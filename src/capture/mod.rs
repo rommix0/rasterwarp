@@ -1,6 +1,8 @@
 //! Video capture: recording the clean canvas output to a file.
 
 pub mod encode;
+pub mod readback;
+pub mod recorder;
 
 use encode::{FPS, VideoFormat};
 
