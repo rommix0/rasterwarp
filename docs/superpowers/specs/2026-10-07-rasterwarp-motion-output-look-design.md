@@ -1,7 +1,7 @@
 # Rasterwarp: Motion, Output and Look: Design
 
 Date: 2026-10-07
-Status: Approved 2026-10-07; amended 2026-10-07 with the off-air preview (Plan 2)
+Status: Approved 2026-10-07; amended 2026-10-07 with the off-air preview (Plan 2) and the program frame rate (after Plan 2)
 Builds on: `docs/superpowers/specs/2026-10-06-rasterwarp-prototype-design.md` (the prototype, now on `main`)
 Research: `docs/research/scanimate-manuals/` (notes taken from the three scanned manuals in `manuals/`)
 
@@ -14,6 +14,8 @@ Six features, delivered as three implementation plans. Each plan leaves the app 
 | 1. Motion | A/B transition mode with drawn curves; sequence ramps; oscillator extras (Frame/Free sync, sine/cosine slave, ramp envelope) |
 | 2. Output | Off-air preview overlay; configurable canvas resolution; video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries, in real-time or frame-accurate offline mode |
 | 3. Look | True raster (scanline) mode; colorizer thresholds; edge fringing; rotation axis wander; level keying over a background image |
+
+After Plan 2, a **program frame rate** was added (see "Frame rate"): the whole canvas runs at a chosen rate, and recordings use it.
 
 **Out of scope** (recorded in "Later"): raster sections, sequential intensity, blanking wipes, the node graph and modulation matrix, MIDI/OSC, audio-driven "mouth control", alpha-channel export, video backgrounds, overlapping sequence ramps.
 
@@ -162,25 +164,22 @@ A small live view of what you're editing but isn't on air yet, in the bottom-rig
 - **Encoder settings:**
   - HEVC: `hevc_nvenc`, `yuv444p`, preset `p4`, tune `hq`, `rc=constqp`, `qp=18`.
   - FFV1: `level=3`, `slices=16`, `slicecrc=1`, `coder=1`, slice threading on, `bgra`, so it's bit-exact.
-  - Both run at 60 fps CFR.
+  - Both run CFR at the program frame rate (see "Frame rate"), with the rate stored as an exact fraction.
   - Measured on the dev machine with the ffmpeg CLI at 1080p60: HEVC NVENC 4:4:4 at 4.6× realtime (49 MB per 10 s); FFV1 at 2.5× realtime (137 MB per 10 s). ProRes was ruled out at 0.7× realtime.
 - **What's recorded:** the clean output.
   - Each frame, the composite pass also draws into a canvas-sized `Rgba8UnormSrgb` capture texture, with fit = (1,1), no letterbox and no UI.
   - The texture is copied into one of **3 staging buffers** (rows padded to 256 bytes) and mapped asynchronously.
   - A mapped frame is un-padded and sent through a **bounded channel (capacity 4)** to the encoder thread.
   - If the channel is full, the frame is **dropped and counted**. Rendering never blocks on encoding.
-- **Timing:**
-  - A frame is captured only when `time · 60`, rounded to the nearest frame, advances, and its pts is that frame number. Pausing stops the clock, so it also stops new frames.
-  - This gives clean 60 fps output whatever the display refresh rate, as long as the display runs at 60 Hz or faster.
-  - If rendering runs below 60 fps, frames are missing and the pts gaps make the encoder hold the previous frame. The panel warns about this.
+- **Timing (real-time mode):** every canvas frame is recorded, with pts = the canvas frame number since Record (see "Frame rate"). Pausing stops the canvas clock, so it also stops new frames. Frames are missing only when catch-up gives up; the pts gaps make the encoder hold the previous frame, and the panel counts them.
 - **Offline (frame-accurate) mode:** a capture-mode choice of **Real-time** (default, as above) or **Offline**.
-  - While recording in Offline mode, animation time advances by exactly 1/60 s per rendered frame, ignoring wall-clock time.
+  - While recording in Offline mode, one canvas frame (exactly one frame period) is drawn per screen refresh, ignoring wall-clock time.
   - Every rendered frame is captured, with pts = frame index.
   - Sending a frame to the encoder **blocks when the channel is full**, so no frame is ever dropped. Rendering, and the on-screen preview, slow down to the encoder's pace.
-  - Transitions, sequences, oscillator phases and drift all run on that same clock, so the file is exactly what real-time playback would look like at a perfect 60 fps.
+  - Transitions, sequences, oscillator phases and drift all run on that same clock, so the file is exactly what real-time playback would look like with no late frames.
   - An optional **Stop after N seconds** field (0 = manual stop) applies to both modes and is mainly useful for offline renders.
   - The panel shows "offline: N× realtime".
-  - When the recording stops, the clock returns to wall-clock time from the current animation time, so there's no jump.
+  - When the recording stops, the canvas clock re-anchors to wall-clock time at the current frame, so there's no jump.
 - **Encoder thread:** owns the swscale context, encoder and muxer.
   - Frame buffers are owned `Vec<u8>`s sent over the bounded channel and returned for reuse on a second channel.
   - It converts RGBA → `yuv444p` (HEVC, swscale with BT.709) or → `bgra` (FFV1, byte swizzle), then encodes and muxes.
@@ -221,6 +220,21 @@ A feasibility spike verified everything in this section on the dev machine (2026
 - **Licensing:** the "full_build" FFmpeg is GPL. Fine for personal use; check the license before distributing binaries.
 
 ---
+
+## Frame rate (added after Plan 2)
+
+The whole program runs its canvas at one chosen frame rate, so motion and trails on screen match recordings exactly and recordings never judder.
+
+- **Rates:** 23.976 (24000/1001), 24, 25, 29.97 (30000/1001), 30, 50, 59.94 (60000/1001), 60 (default). Stored as exact fractions; the encoder's time base and declared frame rate use the fraction, and the keyframe interval is about one second.
+- **Canvas clock:** a canvas frame counter replaces per-refresh `dt` timing. Each canvas frame advances `Motion` (phases, drift, transitions, sequences) by exactly one frame period, then draws warp, feedback, colorize and bloom, the off-air preview, and the capture composite when recording. Feedback trails therefore decay per canvas frame at the chosen rate.
+- **Pacing (real-time):** on each screen refresh the app computes how many canvas frames are due from wall-clock time since an anchor. It draws the due frames back to back, **up to 4 per refresh**, and shows the newest (**catch-up**). Frames more than that behind are skipped and counted as late; the anchor moves so the clock doesn't keep falling behind.
+- **Refreshes with no frame due** only re-composite the current canvas onto the window and redraw the UI, so the panel stays responsive at the display rate. CRT grain and other time-driven composite effects use canvas time, so they change once per canvas frame, exactly as recorded.
+- **Display cadence:** the window still presents with vsync at the monitor's rate. When the monitor rate isn't a multiple of the chosen rate (24 fps on 60 Hz shows frames for 3, 2, 3, 2 refreshes), the on-screen cadence is uneven; recordings are always even.
+- **Pause** stops the canvas clock; unpausing re-anchors it, so nothing jumps.
+- **Offline capture** draws exactly one canvas frame per refresh and ignores wall-clock time (see "Capture"). When it stops, the clock re-anchors at the current frame.
+- **Renderer:** `Renderer::render` is split into drawing a canvas frame (warp → feedback → colorize → bloom) and compositing the current canvas onto an output, so a refresh can composite without advancing the canvas.
+- **Panel:** a top-level **Frame rate** menu next to Canvas, disabled while recording. The header shows the rate and the number of late frames skipped.
+- `RASTERWARP_UNCAPPED=1` still selects Mailbox presentation; it no longer changes animation speed. Offline mode's speed readout measures render cost.
 
 ## Plan 3: Look
 
@@ -293,8 +307,8 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 - `sequence.rs`: cues start at their frames; snap-on-overlap; Reset; Loop; Stop freezes.
 - `motion.rs` preview: none in Live mode; the off-air bank in Transition mode, the destination during a ramp and the new off-air bank after it finishes; none while a sequence is stopped and the selected cue while it runs; the preview clocks advance with the preview's parameters; a source change is reported so the trails can be cleared.
 - `capture`:
-  - Pure pieces: file naming; frame decimation from time (60 fps at a 144 Hz display); row-padding removal; ring-slot rotation; drop counting when the channel is full; the offline clock (exactly 1/60 s per frame, every frame captured, return to wall-clock without a jump); Stop after N seconds.
-  - Integration test: encode 30 frames with FFV1 into a temp directory, reopen with the FFmpeg library, and check the frame count, size and lossless pixel equality of one frame.
+  - Pure pieces: file naming; frame rates (fractions, labels, frame periods); the canvas clock (frames due for a rate and elapsed time, catch-up capped at 4 with late frames counted, no drift at 23.976 over an hour, pause and re-anchoring without a jump, offline one frame per refresh); row-padding removal; ring-slot rotation; drop counting when the channel is full; Stop after N seconds.
+  - Integration test: encode 30 frames with FFV1 into a temp directory, reopen with the FFmpeg library, and check the frame count, size and lossless pixel equality of one frame. A second FFV1 file at 24000/1001 declares exactly that rate.
   - The same test with HEVC NVENC, skipped with a message when NVENC is unavailable.
 - **GPU readback tests** (extending `tests/smoke.rs`):
   - Raster mode on a flat white source with no deflection and 100 lines: output rows alternate between lit and dark at the expected period.
