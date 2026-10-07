@@ -1,26 +1,34 @@
-//! Headless GPU smoke test: builds every pass on a real device, renders a few frames
-//! offscreen, and reads the result back. wgpu validation errors panic, failing the test.
+//! Headless GPU smoke tests: build every pass on a real device, render a few frames
+//! offscreen, and read results back. wgpu validation errors panic, failing the test.
 
 use rasterwarp::blend::FrameParams;
 use rasterwarp::gpu;
+use rasterwarp::motion::{Mode, Motion};
 use rasterwarp::params::Params;
 use rasterwarp::passes::Renderer;
+use rasterwarp::preview::PreviewView;
 use rasterwarp::source::test_card;
 
-const OUT_W: u32 = 320; // 320 * 4 bytes = 1280, a multiple of 256 as buffer copies require
+const OUT_W: u32 = 320;
 const OUT_H: u32 = 180;
+
+fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
+    let backends = wgpu::Backends::all();
+    let instance = gpu::create_instance(backends);
+    match pollster::block_on(gpu::request_device(&instance, backends, None)) {
+        Ok((_adapter, device, queue)) => Some((device, queue)),
+        Err(_) => {
+            eprintln!("skipping smoke test: no GPU adapter available");
+            None
+        }
+    }
+}
 
 #[test]
 fn renders_frames_offscreen() {
-    let backends = wgpu::Backends::all();
-    let instance = gpu::create_instance(backends);
-    let Ok((_adapter, device, queue)) =
-        pollster::block_on(gpu::request_device(&instance, backends, None))
-    else {
-        eprintln!("skipping smoke test: no GPU adapter available");
+    let Some((device, queue)) = device() else {
         return;
     };
-
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
     let mut renderer = Renderer::new(&device, &queue, format, (640, 360), &test_card(400, 300));
@@ -48,11 +56,47 @@ fn renders_frames_offscreen() {
     );
 }
 
+#[test]
+fn renders_the_preview_offscreen() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let mut egui_renderer = egui_wgpu::Renderer::new(
+        &device,
+        wgpu::TextureFormat::Bgra8Unorm,
+        egui_wgpu::RendererOptions::default(),
+    );
+    let mut preview = PreviewView::new(
+        &device,
+        &queue,
+        &mut egui_renderer,
+        (1920, 1080),
+        &test_card(400, 300),
+    );
+    assert_eq!(preview.size(), (480, 270));
+    let mut motion = Motion::new(Params::default());
+    motion.set_mode(Mode::Transition);
+    let shown = motion.preview().expect("Transition mode has a preview");
+    for frame in 0..3 {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        preview.render(&device, &queue, &mut encoder, &shown, frame as f32 * 0.1);
+        queue.submit([encoder.finish()]);
+    }
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll device");
+}
+
+/// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
+/// that buffer copies require.
 fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
-    let size = (OUT_W * OUT_H * 4) as u64;
+    let (width, height) = (texture.width(), texture.height());
+    let row = width * 4;
+    let padded =
+        row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
-        size,
+        size: u64::from(padded * height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
@@ -63,15 +107,11 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(OUT_W * 4),
-                rows_per_image: Some(OUT_H),
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
             },
         },
-        wgpu::Extent3d {
-            width: OUT_W,
-            height: OUT_H,
-            depth_or_array_layers: 1,
-        },
+        texture.size(),
     );
     queue.submit([encoder.finish()]);
     buffer.map_async(wgpu::MapMode::Read, .., |result| {
@@ -80,5 +120,10 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device");
-    buffer.get_mapped_range(..).expect("mapped range").to_vec()
+    let mapped = buffer.get_mapped_range(..).expect("mapped range");
+    mapped
+        .chunks(padded as usize)
+        .flat_map(|r| &r[..row as usize])
+        .copied()
+        .collect()
 }

@@ -8,6 +8,7 @@ pub mod gpu;
 pub mod motion;
 pub mod params;
 pub mod passes;
+pub mod preview;
 pub mod sequence;
 pub mod source;
 pub mod transition;

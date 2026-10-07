@@ -17,6 +17,7 @@ use crate::gpu;
 use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
+use crate::preview::PreviewView;
 use crate::source::{self, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 
@@ -96,6 +97,7 @@ struct State {
     max_texture_side: u32,
     composite_format: wgpu::TextureFormat,
     renderer: Renderer,
+    preview: PreviewView,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
@@ -166,6 +168,7 @@ impl State {
 
         let mut ui = UiState {
             frame_ms: 16.7,
+            show_preview: true,
             ..Default::default()
         };
         let image = match initial_image {
@@ -193,8 +196,9 @@ impl State {
             window.theme(),
             Some(max_texture_side as usize),
         );
-        let egui_renderer =
+        let mut egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
+        let preview = PreviewView::new(&device, &queue, &mut egui_renderer, INTERNAL_SIZE, &image);
 
         Ok(Self {
             window,
@@ -205,6 +209,7 @@ impl State {
             max_texture_side,
             composite_format,
             renderer,
+            preview,
             egui_ctx,
             egui_state,
             egui_renderer,
@@ -227,6 +232,7 @@ impl State {
         match load_fitting(path, self.max_texture_side) {
             Ok(image) => {
                 self.renderer.set_source(&self.device, &self.queue, &image);
+                self.preview.set_source(&self.device, &self.queue, &image);
                 self.ui.source_info = describe(&path.display().to_string(), &image);
                 self.ui.load_error = None;
             }
@@ -274,10 +280,20 @@ impl State {
         });
         let output_size = (self.config.width, self.config.height);
 
+        let overlay = self
+            .ui
+            .show_preview
+            .then(|| self.motion.preview())
+            .flatten()
+            .map(|p| ui::PreviewOverlay {
+                texture: self.preview.texture_id(),
+                size: self.preview.size(),
+                label: p.source.label(),
+            });
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
         let egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            actions = ui::draw(ui, &mut self.motion, &mut self.ui)
+            actions = ui::draw(ui, &mut self.motion, &mut self.ui, overlay.as_ref())
         });
         self.egui_state
             .handle_platform_output(&self.window, egui_output.platform_output);
@@ -299,6 +315,7 @@ impl State {
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if actions.clear_feedback {
             self.renderer.clear_feedback(&mut encoder);
+            self.preview.clear_feedback(&mut encoder);
         }
         self.renderer.render(
             &self.device,
@@ -309,6 +326,21 @@ impl State {
             &srgb_view,
             output_size,
         );
+        match self
+            .ui
+            .show_preview
+            .then(|| self.motion.preview())
+            .flatten()
+        {
+            Some(preview) => self.preview.render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &preview,
+                self.time as f32,
+            ),
+            None => self.preview.hide(),
+        }
         let egui_commands = self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,

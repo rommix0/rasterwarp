@@ -13,6 +13,8 @@ use crate::transition::{AbState, DURATION};
 #[derive(Default)]
 pub struct UiState {
     pub paused: bool,
+    /// Show the off-air preview in Transition and Sequence modes.
+    pub show_preview: bool,
     /// Smoothed frame time in milliseconds.
     pub frame_ms: f32,
     pub source_info: String,
@@ -21,13 +23,29 @@ pub struct UiState {
     pub editing_curve: Option<u32>,
 }
 
+/// The off-air preview as the panel shows it.
+pub struct PreviewOverlay {
+    pub texture: egui::TextureId,
+    /// Texture size in pixels.
+    pub size: (u32, u32),
+    pub label: String,
+}
+
+/// Display width of the preview overlay, in points.
+const PREVIEW_WIDTH: f32 = 320.0;
+
 /// One-shot actions requested by the user this frame.
 #[derive(Default)]
 pub struct UiActions {
     pub clear_feedback: bool,
 }
 
-pub fn draw(ui: &mut Ui, motion: &mut Motion, state: &mut UiState) -> UiActions {
+pub fn draw(
+    ui: &mut Ui,
+    motion: &mut Motion,
+    state: &mut UiState,
+    preview: Option<&PreviewOverlay>,
+) -> UiActions {
     let mut actions = UiActions::default();
     egui::Panel::left("controls")
         .resizable(true)
@@ -47,6 +65,7 @@ pub fn draw(ui: &mut Ui, motion: &mut Motion, state: &mut UiState) -> UiActions 
                 ui.label("Drop a PNG/JPG onto the window to load it.");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut state.paused, "Pause");
+                    ui.checkbox(&mut state.show_preview, "Show preview");
                     if ui.button("Reset all").clicked() {
                         *motion.editable() = Params::default();
                         actions.clear_feedback = true;
@@ -61,7 +80,24 @@ pub fn draw(ui: &mut Ui, motion: &mut Motion, state: &mut UiState) -> UiActions 
                 glow_section(ui, params);
             });
         });
+    if let Some(preview) = preview {
+        preview_overlay(ui.ctx(), preview);
+    }
     actions
+}
+
+/// The preview, framed and labelled, in the bottom-right corner of the window.
+fn preview_overlay(ctx: &egui::Context, preview: &PreviewOverlay) {
+    let height = PREVIEW_WIDTH * preview.size.1 as f32 / preview.size.0 as f32;
+    egui::Area::new(egui::Id::new("preview"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, [-12.0, -12.0])
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(&preview.label);
+                ui.image((preview.texture, egui::vec2(PREVIEW_WIDTH, height)));
+            });
+        });
 }
 
 fn mode_section(ui: &mut Ui, motion: &mut Motion) {
