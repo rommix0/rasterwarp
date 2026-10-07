@@ -4,6 +4,7 @@ pub mod app;
 pub mod blend;
 pub mod curve;
 pub mod gpu;
+pub mod motion;
 pub mod params;
 pub mod passes;
 pub mod sequence;
