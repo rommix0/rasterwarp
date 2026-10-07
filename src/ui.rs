@@ -1,6 +1,6 @@
 //! The egui parameter panel.
 
-use egui::{CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
+use egui::{Button, CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
@@ -148,26 +148,37 @@ fn sequence_controls(ui: &mut Ui, motion: &mut Motion) {
         if ui.button("Add cue").clicked() {
             seq.add_cue();
         }
-        if ui.button("Delete cue").clicked() {
+        let can_delete = seq.cues().len() > 1;
+        if ui
+            .add_enabled(can_delete, Button::new("Delete cue"))
+            .clicked()
+        {
             seq.delete_cue();
         }
     });
     let i = seq.selected;
     let mut start = seq.cues()[i].start_frame;
     let mut duration = seq.cues()[i].duration_frames;
+    // Cue 1 always starts at frame 0 and is never ramped into, so its controls stay disabled.
     ui.add_enabled_ui(i > 0, |ui| {
-        if ui
-            .add(Slider::new(&mut start, 0..=MAX_FRAME).text("start frame"))
-            .changed()
-        {
-            seq.set_start_frame(i, start);
-        }
-        if ui
-            .add(Slider::new(&mut duration, 1..=MAX_FRAME).text("ramp frames"))
-            .changed()
-        {
-            seq.set_duration(i, duration);
-        }
+        ui.horizontal(|ui| {
+            if ui
+                .add(Slider::new(&mut start, 0..=MAX_FRAME).text("start frame"))
+                .changed()
+            {
+                seq.set_start_frame(i, start);
+            }
+            ui.label(format!("{:.2} s", start as f32 / FRAMES_PER_SECOND));
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .add(Slider::new(&mut duration, 1..=MAX_FRAME).text("ramp frames"))
+                .changed()
+            {
+                seq.set_duration(i, duration);
+            }
+            ui.label(format!("{:.2} s", duration as f32 / FRAMES_PER_SECOND));
+        });
         curve_picker(ui, "cue curve", &curves, &mut seq.selected_cue_mut().curve);
     });
     if seq.is_running() {

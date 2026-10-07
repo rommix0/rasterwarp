@@ -72,6 +72,9 @@ impl CustomCurve {
 
     /// Moves point `i`, keeping it between its neighbours and inside the y range.
     pub fn move_point(&mut self, i: usize, x: f32, y: f32) {
+        if i >= self.points.len() {
+            return;
+        }
         let lo = if i == 0 { 0.0 } else { self.points[i - 1][0] } + MIN_GAP;
         let hi = if i + 1 == self.points.len() {
             1.0
@@ -262,6 +265,14 @@ mod tests {
         assert!((c.points()[1][0] - (0.8 - MIN_GAP)).abs() < 1e-6);
         c.remove(0);
         assert_eq!(c.points().len(), 2);
+    }
+
+    #[test]
+    fn moving_an_out_of_range_point_is_a_no_op() {
+        let mut c = CustomCurve::new(0, "c".into());
+        c.insert(0.5, 0.5);
+        c.move_point(99, 0.5, 0.5);
+        assert_eq!(c.points(), &[[0.5, 0.5]]);
     }
 
     #[test]

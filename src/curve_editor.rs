@@ -82,6 +82,14 @@ pub fn curve_editor(ui: &mut Ui, curve: &mut CustomCurve) -> Response {
         visuals.widgets.noninteractive.bg_stroke,
         StrokeKind::Inside,
     );
+    let grid = Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
+    for x in [0.25, 0.5, 0.75] {
+        let (y0, y1) = (*Y_RANGE.start(), *Y_RANGE.end());
+        painter.line_segment([to_screen(rect, [x, y0]), to_screen(rect, [x, y1])], grid);
+    }
+    for y in [-0.25, 0.25, 0.5, 0.75, 1.25] {
+        painter.line_segment([to_screen(rect, [0.0, y]), to_screen(rect, [1.0, y])], grid);
+    }
     let guide = Stroke::new(1.0, visuals.weak_text_color());
     for y in [0.0, 1.0] {
         let a = to_screen(rect, [0.0, y]);

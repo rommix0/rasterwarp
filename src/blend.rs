@@ -166,7 +166,10 @@ pub fn blend(
     let mut oscillators = Vec::with_capacity(MAX_SLOTS);
     for i in 0..OSCILLATOR_COUNT {
         let ((oa, ca), (ob, cb)) = (a_osc[i], b_osc[i]);
-        if same_shape(&oa, &ob) {
+        // Sweep in one slot only when both sides read the same clock: clocks are
+        // unwrapped running totals, so lerping between two different clocks would
+        // spin through every cycle separating them.
+        if same_shape(&oa, &ob) && ca == cb {
             let phase = lerp_phase(
                 f64::from(oa.phase) + from_clocks.osc[ca],
                 f64::from(ob.phase) + to_clocks.osc[cb],
@@ -335,6 +338,52 @@ mod tests {
         let mid = blend(&a, &b, 0.5, Some(0.5), &rest(), &rest());
         assert_eq!(mid.warp.oscillators.len(), OSCILLATOR_COUNT);
         assert!((mid.warp.oscillators[0].frequency - 8.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn slave_flag_mismatch_crossfades_instead_of_sweeping_clocks() {
+        let mut a = Params::default();
+        a.warp.slave_4_to_3 = true;
+        let mut b = a;
+        b.warp.slave_4_to_3 = false;
+        // Make osc 4's own shape equal to the slaved (osc 3) shape on side B.
+        let master = b.warp.oscillators[2];
+        let own = &mut b.warp.oscillators[3];
+        own.waveform = master.waveform;
+        own.input = master.input;
+        own.sync = master.sync;
+        own.envelope = master.envelope;
+        own.target = a.warp.oscillators[3].target;
+        a.warp.oscillators[3].envelope = master.envelope;
+        // Osc 4 defaults to zero amplitude; make it audible on both sides.
+        a.warp.oscillators[3].amplitude = 0.1;
+        b.warp.oscillators[3].amplitude = 0.1;
+        // Unrelated running totals for clocks 2 and 3.
+        let mut c = Clocks::default();
+        c.osc[2] = 600.0;
+        c.osc[3] = 0.0;
+        let ea = a.warp.effective_oscillators()[3];
+        let eb = b.warp.effective_oscillators()[3];
+        assert!(same_shape(&ea.0, &eb.0));
+        assert_ne!(ea.1, eb.1);
+
+        let mid = blend(&a, &b, 0.5, Some(0.5), &c, &c);
+        assert_eq!(mid.warp.oscillators.len(), OSCILLATOR_COUNT + 1);
+
+        let phase_of = |osc: &Oscillator, clock: usize| {
+            (f64::from(osc.phase) + c.osc[clock]).rem_euclid(1.0) as f32
+        };
+        for (t, osc, clock) in [(0.0, &ea.0, ea.1), (1.0, &eb.0, eb.1)] {
+            let f = blend(&a, &b, t, Some(t), &c, &c);
+            let visible: Vec<_> = f
+                .warp
+                .oscillators
+                .iter()
+                .filter(|s| s.index == 3 && s.amplitude > 0.0)
+                .collect();
+            assert_eq!(visible.len(), 1);
+            assert!((visible[0].phase - phase_of(osc, clock)).abs() < 1e-5);
+        }
     }
 
     #[test]

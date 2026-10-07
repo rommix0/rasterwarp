@@ -106,13 +106,18 @@ impl Sequence {
         true
     }
 
-    /// Deletes the selected cue; the first cue can't be deleted.
+    /// Deletes the selected cue; at least one cue always remains. Deleting the
+    /// first cue promotes the next one, which then starts at frame 0.
     pub fn delete_cue(&mut self) -> bool {
-        if self.selected == 0 {
+        if self.cues.len() <= 1 {
             return false;
         }
         self.cues.remove(self.selected);
-        self.selected -= 1;
+        if self.selected == 0 {
+            self.cues[0].start_frame = 0;
+        } else {
+            self.selected -= 1;
+        }
         self.stop();
         true
     }
@@ -214,7 +219,10 @@ impl Sequence {
             && self.base == self.cues.len() - 1
             && self.clock >= end
         {
+            // Carry the overshoot so loops don't drift by up to a frame per cycle.
+            let overshoot = self.clock - end;
             self.reset();
+            self.clock = overshoot;
             events.push(SeqEvent::Restarted);
         }
         events
@@ -312,17 +320,45 @@ mod tests {
     }
 
     #[test]
-    fn cue_count_is_capped_and_first_cue_is_permanent() {
+    fn loop_carries_the_overshoot_into_the_next_cycle() {
+        let mut s = three_cues();
+        s.looping = true;
+        s.run();
+        // Last cue ends at frame 96; 4.125 s is frame 99, three frames past it.
+        let events = s.advance(99.0 / FRAMES_PER_SECOND);
+        assert!(events.contains(&SeqEvent::Restarted));
+        assert_eq!(s.clock_frames(), 3.0);
+        assert_eq!(zoom_from(s.view()), (1.0, None));
+    }
+
+    #[test]
+    fn cue_count_is_capped_and_the_last_cue_is_permanent() {
         let mut s = Sequence::new(Params::default());
+        assert!(!s.delete_cue(), "a single cue always remains");
         for _ in 0..4 {
             assert!(s.add_cue());
         }
         assert!(!s.add_cue());
         assert_eq!(s.cues().len(), MAX_CUES);
-        s.selected = 0;
-        assert!(!s.delete_cue());
         s.selected = 3;
         assert!(s.delete_cue());
         assert_eq!(s.selected, 2);
+        while s.cues().len() > 1 {
+            assert!(s.delete_cue());
+        }
+        assert!(!s.delete_cue());
+        assert_eq!(s.cues().len(), 1);
+    }
+
+    #[test]
+    fn deleting_the_first_cue_promotes_the_next_to_frame_zero() {
+        let mut s = three_cues();
+        s.selected = 0;
+        assert!(s.delete_cue());
+        assert_eq!(s.selected, 0);
+        let frames: Vec<u32> = s.cues().iter().map(|c| c.start_frame).collect();
+        let zooms: Vec<f32> = s.cues().iter().map(|c| c.params.warp.zoom).collect();
+        assert_eq!(frames, vec![0, 72]);
+        assert_eq!(zooms, vec![2.0, 3.0]);
     }
 }
