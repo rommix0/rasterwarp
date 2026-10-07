@@ -58,6 +58,7 @@ pub async fn request_device(
     let (device, queue) = adapter
         .request_device(&wgpu::DeviceDescriptor {
             label: Some("rasterwarp"),
+            required_limits: wgpu::Limits::default().using_resolution(adapter.limits()),
             ..Default::default()
         })
         .await

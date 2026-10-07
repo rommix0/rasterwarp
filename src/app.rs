@@ -108,7 +108,11 @@ impl State {
         let instance = gpu::create_instance(backends);
         let surface = instance
             .create_surface(window.clone())
-            .context("failed to create window surface")?;
+            .with_context(|| {
+                format!(
+                    "failed to create window surface for backend {backends:?}; try RASTERWARP_BACKEND=dx12 or gl"
+                )
+            })?;
         let (adapter, device, queue) =
             pollster::block_on(gpu::request_device(&instance, backends, Some(&surface)))?;
         let max_texture_side = device.limits().max_texture_dimension_2d;
