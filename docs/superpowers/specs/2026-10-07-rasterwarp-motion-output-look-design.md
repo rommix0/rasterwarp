@@ -1,7 +1,7 @@
 # Rasterwarp: Motion, Output and Look: Design
 
 Date: 2026-10-07
-Status: Approved 2026-10-07
+Status: Approved 2026-10-07; amended 2026-10-07 with the off-air preview (Plan 2)
 Builds on: `docs/superpowers/specs/2026-10-06-rasterwarp-prototype-design.md` (the prototype, now on `main`)
 Research: `docs/research/scanimate-manuals/` (notes taken from the three scanned manuals in `manuals/`)
 
@@ -12,7 +12,7 @@ Six features, delivered as three implementation plans. Each plan leaves the app 
 | Plan | Features |
 |---|---|
 | 1. Motion | A/B transition mode with drawn curves; sequence ramps; oscillator extras (Frame/Free sync, sine/cosine slave, ramp envelope) |
-| 2. Output | Configurable canvas resolution; video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries, in real-time or frame-accurate offline mode |
+| 2. Output | Off-air preview overlay; configurable canvas resolution; video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries, in real-time or frame-accurate offline mode |
 | 3. Look | True raster (scanline) mode; colorizer thresholds; edge fringing; rotation axis wander; level keying over a background image |
 
 **Out of scope** (recorded in "Later"): raster sections, sequential intensity, blanking wipes, the node graph and modulation matrix, MIDI/OSC, audio-driven "mouth control", alpha-channel export, video backgrounds, overlapping sequence ramps.
@@ -110,7 +110,7 @@ These findings from the manuals shape the design. Page references are in the res
   - `duration_frames: u32`, 1–999;
   - a curve reference.
 - **Creating and editing cues:**
-  - On entering Sequence mode, the sequence has one cue, a copy of the current on-air parameters.
+  - On first entering Sequence mode, the sequence has one cue, a copy of the current on-air parameters. The cues are kept when you leave and come back (as built in Plan 1).
   - **Add cue** appends a copy of the selected cue, up to 5. **Delete cue** removes the selected one, but at least one cue always remains.
   - While stopped, the panel edits the **selected cue** directly, and the output shows it.
   - Cue 1's start frame is always 0. Cues are kept sorted by start frame, and each start frame must be greater than the previous cue's.
@@ -128,6 +128,23 @@ These findings from the manuals shape the design. Page references are in the res
 ---
 
 ## Plan 2: Output
+
+### Off-air preview
+
+A small live view of what you're editing but isn't on air yet, in the bottom-right corner of the window.
+
+- **What it shows:** `Motion::preview() -> Option<(FrameParams, PreviewLabel)>`.
+  - **Transition mode:** the off-air bank ("Off-air: A" / "Off-air: B"), which is what Transition would bring in. During a ramp it keeps showing the destination. When the ramp finishes, it shows the new off-air bank (the one just left).
+  - **Sequence mode:** the selected cue ("Cue N") while the sequence is running. When stopped, the output already shows the selected cue, so there's no preview.
+  - **Live mode:** no preview.
+- **Rendering:** a second instance of the existing `Renderer`, with its own feedback trails and bloom, at a preview size of 480 px wide with the canvas's aspect ratio (480×270 at 16:9; even height, at least 64). It draws into an offscreen `Rgba8UnormSrgb` texture, which egui shows as a framed overlay with the label, anchored in the bottom-right corner of the window with a small margin.
+  - The preview's composite uses a fit of (1, 1) and the same CRT settings as the main output.
+  - It costs about 6% of a 1080p frame's pixel work.
+  - When the canvas aspect ratio changes, the preview resizes to match.
+- **Phase clocks:** `Motion` keeps a third clock set, `preview`, advanced each frame with the preview's parameters. The preview's oscillator phases are independent of the on-air output: when a transition starts, the ramp begins from the on-air phases (as before), so the landed wave may sit at a different point in its cycle than the preview showed. Shapes, colors and speeds match. Starting the ramp from the preview's phases instead would make the ramp sweep through every cycle the two clocks drifted apart by.
+- **Trails:** the preview's feedback buffers are cleared whenever what it shows changes source: a bank swap or Cut, a different cue selected, or the preview appearing.
+- **Controls:** a **Show preview** checkbox (default on). Pause freezes the preview with everything else.
+- **Capture:** the preview is never recorded. Capture records the clean main output only.
 
 ### Canvas resolution
 
@@ -274,6 +291,7 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 - `transition.rs`: entering Transition copies the on-air bank; start, progress and completion swap the banks; reversing mid-ramp; Cut during and outside a ramp; paused time doesn't advance.
 - `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous.
 - `sequence.rs`: cues start at their frames; snap-on-overlap; Reset; Loop; Stop freezes.
+- `motion.rs` preview: none in Live mode; the off-air bank in Transition mode, the destination during a ramp and the new off-air bank after it finishes; none while a sequence is stopped and the selected cue while it runs; the preview clocks advance with the preview's parameters; a source change is reported so the trails can be cleared.
 - `capture`:
   - Pure pieces: file naming; frame decimation from time (60 fps at a 144 Hz display); row-padding removal; ring-slot rotation; drop counting when the channel is full; the offline clock (exactly 1/60 s per frame, every frame captured, return to wall-clock without a jump); Stop after N seconds.
   - Integration test: encode 30 frames with FFV1 into a temp directory, reopen with the FFmpeg library, and check the frame count, size and lossless pixel equality of one frame.
@@ -284,6 +302,7 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
   - Colorizer thresholds: a gradient source gives level boundaries at the threshold positions.
   - Keying: see-through level pixels show the background color.
   - Canvas resize: rendering after `resize` produces the new size.
+  - Preview: a second `Renderer` at 480×270 renders into an offscreen texture of that size.
 - **Manual (release build):** transitions, curve editor, sequence playback, recording 30 s in each format, then playing the files in a media player; raster mode look; keying with a background image.
 
 ## Later (documented, not built now)
