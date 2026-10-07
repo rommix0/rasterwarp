@@ -12,28 +12,31 @@ use crate::params::{
 /// At most two slots per oscillator (one per bank) while their settings differ.
 pub const MAX_SLOTS: usize = 2 * OSCILLATOR_COUNT;
 
-/// Running phases, in cycles. They advance by each rate every frame, so changing a
-/// rate (even mid-transition) changes the speed without jumping the wave.
+/// Running phases, in cycles. Stored as unwrapped f64 running totals so the two sides
+/// of a blend stay continuous even when one passes a wrap boundary. Values are wrapped
+/// only when producing frame values, so f64 precision (which holds for days of playback)
+/// is preserved. Frame-synced oscillators hold still (don't advance osc clock).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Clocks {
     pub osc: [f64; OSCILLATOR_COUNT],
     pub lfo: [f64; OSCILLATOR_COUNT],
-    /// Palette cycle offset, in levels.
+    /// Palette cycle offset, in levels (unwrapped).
     pub cycle: f64,
 }
 
 impl Clocks {
-    /// Advances by the rates in `p` over `dt` seconds. Frame-synced oscillators hold still.
+    /// Advances by the rates in `p` over `dt` seconds. Stores unwrapped running totals
+    /// so blends stay continuous across wrap boundaries. Frame-synced oscillators hold
+    /// still.
     pub fn advance(&mut self, p: &Params, dt: f32) {
         let dt = f64::from(dt);
         for (i, osc) in p.warp.oscillators.iter().enumerate() {
             if osc.sync == OscSync::Free {
-                self.osc[i] = (self.osc[i] + f64::from(osc.phase_speed) * dt).rem_euclid(1.0);
+                self.osc[i] += f64::from(osc.phase_speed) * dt;
             }
-            self.lfo[i] = (self.lfo[i] + f64::from(osc.lfo_rate) * dt).rem_euclid(1.0);
+            self.lfo[i] += f64::from(osc.lfo_rate) * dt;
         }
-        // 840 is a multiple of every level count 2..=8, so wrapping never shifts colors.
-        self.cycle = (self.cycle + f64::from(p.colorize.cycle_speed) * dt).rem_euclid(840.0);
+        self.cycle += f64::from(p.colorize.cycle_speed) * dt;
     }
 }
 
@@ -137,7 +140,7 @@ fn slot(
         frequency: osc.frequency,
         amplitude: osc.amplitude * weight * envelope_gain(osc.envelope, ramp_progress),
         phase: (f64::from(osc.phase) + clocks.osc[clock]).rem_euclid(1.0) as f32,
-        lfo_phase: clocks.lfo[clock] as f32,
+        lfo_phase: clocks.lfo[clock].rem_euclid(1.0) as f32,
         lfo_depth: osc.lfo_depth,
     }
 }
@@ -435,5 +438,25 @@ mod tests {
         assert_eq!(f.glow, p.glow);
         assert_eq!(f.colorize.levels, p.colorize.levels);
         assert_eq!(f.warp.oscillators.len(), OSCILLATOR_COUNT);
+    }
+
+    #[test]
+    fn phase_is_continuous_when_one_side_passes_a_wrap() {
+        let mut a = Params::default();
+        a.warp.oscillators[0].phase_speed = 0.0;
+        let mut b = a;
+        b.warp.oscillators[0].phase_speed = 1.0;
+        let mut from = Clocks::default();
+        from.osc[0] = 0.98;
+        let mut to = from;
+        from.advance(&a, 0.04);
+        to.advance(&b, 0.04); // 1.02: past the wrap
+        let f = blend(&a, &b, 0.5, Some(0.5), &from, &to);
+        let phase = f.warp.oscillators[0].phase;
+        let off = phase.min(1.0 - phase);
+        assert!(
+            off < 1e-4,
+            "expected ~0.0 (half way from 0.98 to 1.02), got {phase}"
+        );
     }
 }
