@@ -22,7 +22,8 @@ fn palette_at(c: f32, levels: u32) -> vec3<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let g = textureSampleLevel(source, samp, in.uv, 0.0).r;
     if u.settings.w > 0.5 {
-        return vec4<f32>(g, g, g, 1.0);
+        let l = pow(g, 2.2);
+        return vec4<f32>(l, l, l, 1.0);
     }
     let levels = u.settings.x;
     let softness = u.settings.y;

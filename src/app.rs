@@ -82,6 +82,7 @@ struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     max_texture_side: u32,
+    composite_format: wgpu::TextureFormat,
     renderer: Renderer,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -113,10 +114,16 @@ impl State {
         let max_texture_side = device.limits().max_texture_dimension_2d;
 
         let caps = surface.get_capabilities(&adapter);
-        // The swapchain itself is non-sRGB (what egui expects); the composite pass draws
-        // through an sRGB view of it so its linear output is encoded correctly.
+        // The swapchain itself is non-sRGB (what egui expects). Where the adapter allows an
+        // sRGB view of it, the composite pass draws through that view; otherwise (e.g. GL)
+        // it draws into the plain format and encodes sRGB in the shader.
         let format = caps.formats[0].remove_srgb_suffix();
         let srgb_format = format.add_srgb_suffix();
+        let srgb_view_ok = adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
+        let composite_format = if srgb_view_ok { srgb_format } else { format };
         // Fifo (vsync) keeps the per-frame feedback semantics at 60 fps. RASTERWARP_UNCAPPED=1
         // opts into Mailbox (uncapped, no tearing) to measure the real render cost.
         let uncapped = std::env::var("RASTERWARP_UNCAPPED").is_ok_and(|v| v == "1");
@@ -130,12 +137,16 @@ impl State {
             .get_default_config(&adapter, size.width, size.height)
             .context("window surface is not supported by the GPU adapter")?;
         config.format = format;
-        config.view_formats = vec![srgb_format];
+        config.view_formats = if srgb_view_ok {
+            vec![srgb_format]
+        } else {
+            vec![]
+        };
         config.present_mode = present_mode;
         if size.width > 0 && size.height > 0 {
             surface.configure(&device, &config);
         }
-        log::info!("surface: {format:?} (composite via {srgb_format:?}), {present_mode:?}");
+        log::info!("surface: {format:?} (composite via {composite_format:?}), {present_mode:?}");
 
         let mut ui = UiState {
             frame_ms: 16.7,
@@ -155,7 +166,7 @@ impl State {
             },
             None => test_card(&mut ui),
         };
-        let renderer = Renderer::new(&device, &queue, srgb_format, INTERNAL_SIZE, &image);
+        let renderer = Renderer::new(&device, &queue, composite_format, INTERNAL_SIZE, &image);
 
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -176,6 +187,7 @@ impl State {
             device,
             queue,
             max_texture_side,
+            composite_format,
             renderer,
             egui_ctx,
             egui_state,
@@ -239,7 +251,7 @@ impl State {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let srgb_view = frame.texture.create_view(&wgpu::TextureViewDescriptor {
-            format: Some(self.config.format.add_srgb_suffix()),
+            format: Some(self.composite_format),
             ..Default::default()
         });
         let output_size = (self.config.width, self.config.height);

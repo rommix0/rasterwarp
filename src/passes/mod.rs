@@ -101,7 +101,13 @@ impl Renderer {
             self.feedback.output(),
             self.bloom.output(),
             output,
-            &composite::uniforms(&params.glow, time, self.size, output_size),
+            &composite::uniforms(
+                &params.glow,
+                time,
+                self.size,
+                output_size,
+                self.composite.encode_srgb(),
+            ),
         );
     }
 }

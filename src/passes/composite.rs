@@ -31,6 +31,7 @@ pub fn uniforms(
     time: f32,
     internal: (u32, u32),
     output: (u32, u32),
+    encode_srgb: bool,
 ) -> CompositeUniforms {
     let fit = letterbox(output, internal);
     CompositeUniforms {
@@ -41,13 +42,14 @@ pub fn uniforms(
             p.chroma / internal.0 as f32,
         ],
         misc: [p.noise, time, internal.0 as f32, internal.1 as f32],
-        fit: [fit[0], fit[1], 0.0, 0.0],
+        fit: [fit[0], fit[1], if encode_srgb { 1.0 } else { 0.0 }, 0.0],
     }
 }
 
 pub struct CompositePass {
     pass: FullscreenPass,
     uniform: wgpu::Buffer,
+    encode_srgb: bool,
 }
 
 impl CompositePass {
@@ -65,7 +67,16 @@ impl CompositePass {
             },
         );
         let uniform = pass.create_uniform_buffer(device);
-        Self { pass, uniform }
+        Self {
+            pass,
+            uniform,
+            encode_srgb: !output_format.is_srgb(),
+        }
+    }
+
+    /// Whether the shader must encode sRGB itself because the output format is not sRGB.
+    pub fn encode_srgb(&self) -> bool {
+        self.encode_srgb
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -117,7 +128,16 @@ mod tests {
     fn chroma_is_converted_to_uv() {
         let mut p = crate::params::Params::default().glow;
         p.chroma = 2.0;
-        let u = uniforms(&p, 0.0, (1000, 500), (1000, 500));
+        let u = uniforms(&p, 0.0, (1000, 500), (1000, 500), false);
         assert!((u.glow[3] - 0.002).abs() < 1e-7);
+    }
+
+    #[test]
+    fn srgb_encode_flag_is_packed() {
+        let p = crate::params::Params::default().glow;
+        let on = uniforms(&p, 0.0, (1000, 500), (1000, 500), true);
+        let off = uniforms(&p, 0.0, (1000, 500), (1000, 500), false);
+        assert_eq!(on.fit[2], 1.0);
+        assert_eq!(off.fit[2], 0.0);
     }
 }
