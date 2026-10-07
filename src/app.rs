@@ -81,6 +81,7 @@ struct State {
     config: wgpu::SurfaceConfiguration,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    max_texture_side: u32,
     renderer: Renderer,
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
@@ -109,6 +110,7 @@ impl State {
             .context("failed to create window surface")?;
         let (adapter, device, queue) =
             pollster::block_on(gpu::request_device(&instance, backends, Some(&surface)))?;
+        let max_texture_side = device.limits().max_texture_dimension_2d;
 
         let caps = surface.get_capabilities(&adapter);
         // The swapchain itself is non-sRGB (what egui expects); the composite pass draws
@@ -138,7 +140,7 @@ impl State {
             ..Default::default()
         };
         let image = match initial_image {
-            Some(path) => match source::load_image(path) {
+            Some(path) => match load_fitting(path, max_texture_side) {
                 Ok(image) => {
                     ui.source_info = describe(&path.display().to_string(), &image);
                     image
@@ -160,7 +162,7 @@ impl State {
             &window,
             Some(window.scale_factor() as f32),
             window.theme(),
-            Some(device.limits().max_texture_dimension_2d as usize),
+            Some(max_texture_side as usize),
         );
         let egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
@@ -171,6 +173,7 @@ impl State {
             config,
             device,
             queue,
+            max_texture_side,
             renderer,
             egui_ctx,
             egui_state,
@@ -191,7 +194,7 @@ impl State {
     }
 
     fn load_source(&mut self, path: &Path) {
-        match source::load_image(path) {
+        match load_fitting(path, self.max_texture_side) {
             Ok(image) => {
                 self.renderer.set_source(&self.device, &self.queue, &image);
                 self.ui.source_info = describe(&path.display().to_string(), &image);
@@ -318,4 +321,12 @@ fn test_card(ui: &mut UiState) -> GrayImage {
 
 fn describe(name: &str, image: &GrayImage) -> String {
     format!("Source: {name} ({}×{})", image.width, image.height)
+}
+
+/// Loads an image and checks it fits in a GPU texture.
+fn load_fitting(path: &Path, max_side: u32) -> anyhow::Result<GrayImage> {
+    let image = source::load_image(path)?;
+    source::ensure_fits(&image, max_side)
+        .with_context(|| format!("could not load {}", path.display()))?;
+    Ok(image)
 }

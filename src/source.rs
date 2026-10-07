@@ -33,6 +33,18 @@ pub fn load_image(path: &Path) -> Result<GrayImage> {
     Ok(from_dynamic(image))
 }
 
+/// Errors if the image is too large to upload as a single GPU texture.
+pub fn ensure_fits(image: &GrayImage, max_side: u32) -> Result<()> {
+    if image.width > max_side || image.height > max_side {
+        anyhow::bail!(
+            "image is {}×{}, larger than the GPU texture limit of {max_side}×{max_side}",
+            image.width,
+            image.height
+        );
+    }
+    Ok(())
+}
+
 /// Procedural test card with many gray levels so every colorizer level gets used:
 /// concentric rings, stepped bars, a hollow block, and a gradient strip.
 pub fn test_card(width: u32, height: u32) -> GrayImage {
@@ -139,5 +151,16 @@ mod tests {
     fn missing_file_is_an_error() {
         let err = load_image(Path::new("does-not-exist.png")).unwrap_err();
         assert!(err.to_string().contains("does-not-exist.png"));
+    }
+
+    #[test]
+    fn ensure_fits_accepts_images_within_limit() {
+        assert!(ensure_fits(&test_card(64, 32), 64).is_ok());
+    }
+
+    #[test]
+    fn ensure_fits_rejects_oversized_images() {
+        let err = ensure_fits(&test_card(65, 32), 64).unwrap_err();
+        assert!(err.to_string().contains("65×32"));
     }
 }
