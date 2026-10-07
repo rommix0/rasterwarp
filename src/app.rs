@@ -8,12 +8,13 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalSize};
-use winit::event::WindowEvent;
+use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
+use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::blend::{Clocks, blend};
 use crate::gpu;
+use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
 use crate::source::{self, GrayImage};
@@ -62,11 +63,21 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         let Some(state) = &mut self.state else { return };
-        let _ = state.egui_state.on_window_event(&state.window, &event);
+        let response = state.egui_state.on_window_event(&state.window, &event);
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::DroppedFile(path) => state.load_source(&path),
+            // Space triggers a transition unless egui is using the keyboard (e.g. a text field).
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && !event.repeat
+                    && event.logical_key == Key::Named(NamedKey::Space)
+                    && !response.consumed
+                    && !state.egui_ctx.egui_wants_keyboard_input() =>
+            {
+                state.motion.trigger();
+            }
             WindowEvent::RedrawRequested => {
                 state.redraw();
                 state.window.request_redraw();
@@ -88,9 +99,7 @@ struct State {
     egui_ctx: egui::Context,
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
-    params: Params,
-    /// Running oscillator, LFO and palette phases.
-    clocks: Clocks,
+    motion: Motion,
     ui: UiState,
     time: f64,
     last_frame: Instant,
@@ -199,8 +208,7 @@ impl State {
             egui_ctx,
             egui_state,
             egui_renderer,
-            params: Params::default(),
-            clocks: Clocks::default(),
+            motion: Motion::new(Params::default()),
             ui,
             time: 0.0,
             last_frame: Instant::now(),
@@ -238,7 +246,7 @@ impl State {
             // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
             let step = dt.min(0.1);
             self.time += f64::from(step);
-            self.clocks.advance(&self.params, step);
+            self.motion.advance(step);
         }
 
         if self.config.width == 0 || self.config.height == 0 {
@@ -269,7 +277,7 @@ impl State {
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
         let egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
-            actions = ui::draw(ui, &mut self.params, &mut self.ui)
+            actions = ui::draw(ui, &mut self.motion, &mut self.ui)
         });
         self.egui_state
             .handle_platform_output(&self.window, egui_output.platform_output);
@@ -287,14 +295,7 @@ impl State {
             }
         }
 
-        let frame_params = blend(
-            &self.params,
-            &self.params,
-            0.0,
-            None,
-            &self.clocks,
-            &self.clocks,
-        );
+        let frame_params = self.motion.frame();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if actions.clear_feedback {
             self.renderer.clear_feedback(&mut encoder);

@@ -1,8 +1,13 @@
 //! The egui parameter panel.
 
-use egui::{CollapsingHeader, ComboBox, Slider, Ui};
+use egui::{CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
-use crate::params::{Axis, OscInput, Params, Waveform, ranges};
+use crate::curve::{CurveLibrary, CurveRef};
+use crate::curve_editor::curve_editor;
+use crate::motion::{Mode, Motion};
+use crate::params::{Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, ranges};
+use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
+use crate::transition::{AbState, DURATION};
 
 /// UI-only state that isn't a render parameter.
 #[derive(Default)]
@@ -12,6 +17,8 @@ pub struct UiState {
     pub frame_ms: f32,
     pub source_info: String,
     pub load_error: Option<String>,
+    /// The user curve open in the curve editor.
+    pub editing_curve: Option<u32>,
 }
 
 /// One-shot actions requested by the user this frame.
@@ -20,7 +27,7 @@ pub struct UiActions {
     pub clear_feedback: bool,
 }
 
-pub fn draw(ui: &mut Ui, params: &mut Params, state: &mut UiState) -> UiActions {
+pub fn draw(ui: &mut Ui, motion: &mut Motion, state: &mut UiState) -> UiActions {
     let mut actions = UiActions::default();
     egui::Panel::left("controls")
         .resizable(true)
@@ -41,10 +48,13 @@ pub fn draw(ui: &mut Ui, params: &mut Params, state: &mut UiState) -> UiActions 
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut state.paused, "Pause");
                     if ui.button("Reset all").clicked() {
-                        *params = Params::default();
+                        *motion.editable() = Params::default();
                         actions.clear_feedback = true;
                     }
                 });
+                mode_section(ui, motion);
+                curves_section(ui, &mut motion.curves, state);
+                let params = motion.editable();
                 warp_section(ui, params);
                 colorize_section(ui, params);
                 feedback_section(ui, params, &mut actions);
@@ -52,6 +62,158 @@ pub fn draw(ui: &mut Ui, params: &mut Params, state: &mut UiState) -> UiActions 
             });
         });
     actions
+}
+
+fn mode_section(ui: &mut Ui, motion: &mut Motion) {
+    ui.separator();
+    ui.horizontal(|ui| {
+        for mode in Mode::ALL {
+            if ui
+                .selectable_label(motion.mode() == mode, format!("{mode:?}"))
+                .clicked()
+            {
+                motion.set_mode(mode);
+            }
+        }
+    });
+    match motion.mode() {
+        Mode::Live => {
+            ui.label("Editing what's on screen.");
+        }
+        Mode::Transition => transition_controls(ui, motion),
+        Mode::Sequence => sequence_controls(ui, motion),
+    }
+    ui.separator();
+}
+
+fn transition_controls(ui: &mut Ui, motion: &mut Motion) {
+    let ab = &motion.ab;
+    ui.label(format!(
+        "On air: {} · editing: {}",
+        AbState::bank_name(ab.on_air),
+        AbState::bank_name(ab.off_air())
+    ));
+    let label = match ab.ramp() {
+        Some(r) if r.forward => "Reverse (Space)",
+        Some(_) => "Resume (Space)",
+        None => "Transition (Space)",
+    };
+    ui.horizontal(|ui| {
+        if ui.button(label).clicked() {
+            motion.trigger();
+        }
+        if ui.button("Cut").clicked() {
+            motion.cut();
+        }
+    });
+    let progress = motion.ab.ramp().map_or(0.0, |r| r.progress);
+    ui.add(ProgressBar::new(progress).show_percentage());
+    ui.add(
+        Slider::new(&mut motion.ab.duration, DURATION)
+            .text("duration (s)")
+            .logarithmic(true),
+    );
+    curve_picker(ui, "ab curve", &motion.curves, &mut motion.ab.curve);
+}
+
+fn sequence_controls(ui: &mut Ui, motion: &mut Motion) {
+    let curves = motion.curves.clone();
+    let seq = motion.sequence_mut();
+    ui.horizontal(|ui| {
+        if seq.is_running() {
+            if ui.button("Stop").clicked() {
+                seq.stop();
+            }
+        } else if ui.button("Run").clicked() {
+            seq.run();
+        }
+        if ui.button("Reset").clicked() {
+            seq.reset();
+        }
+        ui.checkbox(&mut seq.looping, "Loop");
+    });
+    let frame = seq.clock_frames();
+    ui.label(format!(
+        "Frame {:.0} ({:.2} s at {FRAMES_PER_SECOND} fps)",
+        frame,
+        frame / FRAMES_PER_SECOND
+    ));
+    for i in 0..seq.cues().len() {
+        let text = format!("Cue {} @ frame {}", i + 1, seq.cues()[i].start_frame);
+        if ui.selectable_label(seq.selected == i, text).clicked() {
+            seq.selected = i;
+        }
+    }
+    ui.horizontal(|ui| {
+        if ui.button("Add cue").clicked() {
+            seq.add_cue();
+        }
+        if ui.button("Delete cue").clicked() {
+            seq.delete_cue();
+        }
+    });
+    let i = seq.selected;
+    let mut start = seq.cues()[i].start_frame;
+    let mut duration = seq.cues()[i].duration_frames;
+    ui.add_enabled_ui(i > 0, |ui| {
+        if ui
+            .add(Slider::new(&mut start, 0..=MAX_FRAME).text("start frame"))
+            .changed()
+        {
+            seq.set_start_frame(i, start);
+        }
+        if ui
+            .add(Slider::new(&mut duration, 1..=MAX_FRAME).text("ramp frames"))
+            .changed()
+        {
+            seq.set_duration(i, duration);
+        }
+        curve_picker(ui, "cue curve", &curves, &mut seq.selected_cue_mut().curve);
+    });
+    if seq.is_running() {
+        ui.label("Running: the panel still edits the selected cue.");
+    }
+}
+
+fn curve_picker(ui: &mut Ui, id: &str, curves: &CurveLibrary, curve: &mut CurveRef) {
+    ComboBox::from_id_salt(id)
+        .selected_text(format!("curve: {}", curves.name(*curve)))
+        .show_ui(ui, |ui| {
+            for choice in curves.choices() {
+                ui.selectable_value(curve, choice, curves.name(choice));
+            }
+        });
+}
+
+fn curves_section(ui: &mut Ui, curves: &mut CurveLibrary, state: &mut UiState) {
+    CollapsingHeader::new("Curves").show(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            for c in &curves.custom {
+                if ui
+                    .selectable_label(state.editing_curve == Some(c.id), &c.name)
+                    .clicked()
+                {
+                    state.editing_curve = Some(c.id);
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui.button("New curve").clicked() {
+                state.editing_curve = curves.add().or(state.editing_curve);
+            }
+            if let Some(id) = state.editing_curve
+                && ui.button("Delete").clicked()
+            {
+                curves.remove(id);
+                state.editing_curve = None;
+            }
+        });
+        if let Some(curve) = state.editing_curve.and_then(|id| curves.get_mut(id)) {
+            ui.text_edit_singleline(&mut curve.name);
+            curve_editor(ui, curve);
+            ui.small("Drag points · double-click to add · right-click to remove");
+        }
+    });
 }
 
 fn warp_section(ui: &mut Ui, params: &mut Params) {
@@ -64,50 +226,67 @@ fn warp_section(ui: &mut Ui, params: &mut Params) {
             ui.add(Slider::new(&mut warp.offset[0], ranges::OFFSET).text("offset x"));
             ui.add(Slider::new(&mut warp.offset[1], ranges::OFFSET).text("offset y"));
             ui.add(Slider::new(&mut warp.drift, ranges::DRIFT).text("analog drift"));
+            ui.checkbox(
+                &mut warp.slave_4_to_3,
+                "Slave osc 4 to osc 3 (sine/cosine pair)",
+            );
+            let slaved = warp.slave_4_to_3;
             for (i, osc) in warp.oscillators.iter_mut().enumerate() {
+                // A slaved oscillator 4 keeps only its own target, amplitude and envelope.
+                let follows = slaved && i == 3;
                 CollapsingHeader::new(format!("Oscillator {}", i + 1))
                     .default_open(i == 0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ComboBox::from_id_salt(("waveform", i))
-                                .selected_text(format!("{:?}", osc.waveform))
-                                .show_ui(ui, |ui| {
-                                    for w in Waveform::ALL {
-                                        ui.selectable_value(&mut osc.waveform, w, format!("{w:?}"));
-                                    }
-                                });
-                            ComboBox::from_id_salt(("input", i))
-                                .selected_text(format!("by {:?}", osc.input))
-                                .show_ui(ui, |ui| {
-                                    for input in OscInput::ALL {
-                                        ui.selectable_value(
-                                            &mut osc.input,
-                                            input,
-                                            format!("by {input:?}"),
-                                        );
-                                    }
-                                });
                             ui.selectable_value(&mut osc.target, Axis::X, "→ X");
                             ui.selectable_value(&mut osc.target, Axis::Y, "→ Y");
+                            ComboBox::from_id_salt(("envelope", i))
+                                .selected_text(format!("{:?}", osc.envelope))
+                                .show_ui(ui, |ui| {
+                                    for e in Envelope::ALL {
+                                        ui.selectable_value(&mut osc.envelope, e, format!("{e:?}"));
+                                    }
+                                });
                         });
                         ui.add(
                             Slider::new(&mut osc.amplitude, ranges::AMPLITUDE).text("amplitude"),
                         );
-                        ui.add(
-                            Slider::new(&mut osc.frequency, ranges::FREQUENCY).text("frequency"),
-                        );
-                        ui.add(Slider::new(&mut osc.phase, ranges::PHASE).text("phase"));
-                        ui.add(
-                            Slider::new(&mut osc.phase_speed, ranges::PHASE_SPEED)
-                                .text("phase speed"),
-                        );
-                        ui.add(Slider::new(&mut osc.lfo_rate, ranges::LFO_RATE).text("LFO rate"));
-                        ui.add(
-                            Slider::new(&mut osc.lfo_depth, ranges::LFO_DEPTH).text("LFO depth"),
-                        );
+                        ui.add_enabled_ui(!follows, |ui| oscillator_shape(ui, i, osc));
                     });
             }
         });
+}
+
+/// The controls a slaved oscillator 4 takes from oscillator 3.
+fn oscillator_shape(ui: &mut Ui, i: usize, osc: &mut Oscillator) {
+    ui.horizontal(|ui| {
+        ComboBox::from_id_salt(("waveform", i))
+            .selected_text(format!("{:?}", osc.waveform))
+            .show_ui(ui, |ui| {
+                for w in Waveform::ALL {
+                    ui.selectable_value(&mut osc.waveform, w, format!("{w:?}"));
+                }
+            });
+        ComboBox::from_id_salt(("input", i))
+            .selected_text(format!("by {:?}", osc.input))
+            .show_ui(ui, |ui| {
+                for input in OscInput::ALL {
+                    ui.selectable_value(&mut osc.input, input, format!("by {input:?}"));
+                }
+            });
+        ComboBox::from_id_salt(("sync", i))
+            .selected_text(format!("{:?} sync", osc.sync))
+            .show_ui(ui, |ui| {
+                for sync in OscSync::ALL {
+                    ui.selectable_value(&mut osc.sync, sync, format!("{sync:?} sync"));
+                }
+            });
+    });
+    ui.add(Slider::new(&mut osc.frequency, ranges::FREQUENCY).text("frequency"));
+    ui.add(Slider::new(&mut osc.phase, ranges::PHASE).text("phase"));
+    ui.add(Slider::new(&mut osc.phase_speed, ranges::PHASE_SPEED).text("phase speed"));
+    ui.add(Slider::new(&mut osc.lfo_rate, ranges::LFO_RATE).text("LFO rate"));
+    ui.add(Slider::new(&mut osc.lfo_depth, ranges::LFO_DEPTH).text("LFO depth"));
 }
 
 fn colorize_section(ui: &mut Ui, params: &mut Params) {

@@ -3,6 +3,7 @@
 pub mod app;
 pub mod blend;
 pub mod curve;
+pub mod curve_editor;
 pub mod gpu;
 pub mod motion;
 pub mod params;
