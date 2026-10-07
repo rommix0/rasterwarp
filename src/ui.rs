@@ -199,7 +199,7 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, frame_ms: f32, actions:
                     } else if frame_ms > 1000.0 / 60.0 * 1.05 {
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Rendering is below 60 fps, so frames will be missing.                              Offline mode records every frame.",
+                            "Rendering is below 60 fps, so frames will be missing. Offline mode records every frame.",
                         );
                     }
                 }
