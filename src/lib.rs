@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod blend;
+pub mod canvas;
 pub mod curve;
 pub mod curve_editor;
 pub mod gpu;

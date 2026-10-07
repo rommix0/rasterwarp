@@ -56,6 +56,27 @@ impl PreviewView {
         (self.target.texture.width(), self.target.texture.height())
     }
 
+    /// Matches a new canvas size, keeping the canvas's aspect ratio.
+    pub fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        egui_renderer: &mut egui_wgpu::Renderer,
+        canvas: (u32, u32),
+    ) {
+        let size = size_for(canvas);
+        if size == self.size() {
+            return;
+        }
+        self.renderer.resize(device, size);
+        self.target = RenderTarget::new(device, "preview", size.0, size.1, FORMAT);
+        egui_renderer.update_egui_texture_from_wgpu_texture(
+            device,
+            &self.target.view,
+            wgpu::FilterMode::Linear,
+            self.texture_id,
+        );
+    }
+
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {
         self.renderer.set_source(device, queue, image);
     }

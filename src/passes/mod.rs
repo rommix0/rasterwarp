@@ -21,7 +21,7 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// `size` is the fixed internal resolution; `output_format` is the format of the
+    /// `size` is the internal (canvas) resolution; `output_format` is the format of the
     /// texture `render` draws into.
     pub fn new(
         device: &wgpu::Device,
@@ -41,6 +41,21 @@ impl Renderer {
             bloom: bloom::BloomPass::new(device, w, h),
             composite: composite::CompositePass::new(device, output_format),
         }
+    }
+
+    /// The internal (canvas) resolution.
+    pub fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    /// Rebuilds every canvas-sized target at `size`. The trails start out cleared.
+    pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
+        let (w, h) = size;
+        self.size = size;
+        self.warp = warp::WarpPass::new(device, w, h);
+        self.colorize = colorize::ColorizePass::new(device, w, h);
+        self.feedback = feedback::FeedbackPass::new(device, w, h);
+        self.bloom = bloom::BloomPass::new(device, w, h);
     }
 
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {

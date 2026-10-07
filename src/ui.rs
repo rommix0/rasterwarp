@@ -2,6 +2,7 @@
 
 use egui::{Button, CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
+use crate::canvas::{CanvasChoice, PRESETS};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::motion::{Mode, Motion};
@@ -21,6 +22,7 @@ pub struct UiState {
     pub load_error: Option<String>,
     /// The user curve open in the curve editor.
     pub editing_curve: Option<u32>,
+    pub canvas: CanvasChoice,
 }
 
 /// The off-air preview as the panel shows it.
@@ -38,6 +40,8 @@ const PREVIEW_WIDTH: f32 = 320.0;
 #[derive(Default)]
 pub struct UiActions {
     pub clear_feedback: bool,
+    /// Switch the canvas to this size.
+    pub apply_canvas: Option<(u32, u32)>,
 }
 
 pub fn draw(
@@ -71,6 +75,7 @@ pub fn draw(
                         actions.clear_feedback = true;
                     }
                 });
+                canvas_section(ui, &mut state.canvas, &mut actions);
                 mode_section(ui, motion);
                 curves_section(ui, &mut motion.curves, state);
                 let params = motion.editable();
@@ -98,6 +103,42 @@ fn preview_overlay(ctx: &egui::Context, preview: &PreviewOverlay) {
                 ui.image((preview.texture, egui::vec2(PREVIEW_WIDTH, height)));
             });
         });
+}
+
+fn canvas_section(ui: &mut Ui, canvas: &mut CanvasChoice, actions: &mut UiActions) {
+    CollapsingHeader::new("Canvas").show(ui, |ui| {
+        let name = |i: usize| match PRESETS.get(i) {
+            Some((name, (w, h))) => format!("{name} ({w}×{h})"),
+            None => "Custom".to_owned(),
+        };
+        ComboBox::from_id_salt("canvas preset")
+            .selected_text(name(canvas.choice))
+            .show_ui(ui, |ui| {
+                for i in 0..=CanvasChoice::CUSTOM {
+                    ui.selectable_value(&mut canvas.choice, i, name(i));
+                }
+            });
+        if canvas.choice == CanvasChoice::CUSTOM {
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut canvas.custom.0).range(1..=canvas.max_side));
+                ui.label("×");
+                ui.add(egui::DragValue::new(&mut canvas.custom.1).range(1..=canvas.max_side));
+            });
+        }
+        let (w, h) = canvas.requested();
+        let (cw, ch) = canvas.current;
+        ui.label(format!("Rendering at {cw}×{ch}"));
+        ui.horizontal(|ui| {
+            let changed = (w, h) != canvas.current;
+            if ui
+                .add_enabled(changed, Button::new(format!("Apply {w}×{h}")))
+                .clicked()
+            {
+                actions.apply_canvas = Some((w, h));
+            }
+            ui.small("clears the trails");
+        });
+    });
 }
 
 fn mode_section(ui: &mut Ui, motion: &mut Motion) {

@@ -13,6 +13,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::canvas::{self, CanvasChoice};
 use crate::gpu;
 use crate::motion::Motion;
 use crate::params::Params;
@@ -20,9 +21,6 @@ use crate::passes::Renderer;
 use crate::preview::PreviewView;
 use crate::source::{self, GrayImage};
 use crate::ui::{self, UiActions, UiState};
-
-/// Fixed internal render resolution, independent of the window size.
-pub const INTERNAL_SIZE: (u32, u32) = (1920, 1080);
 
 pub struct App {
     initial_image: Option<PathBuf>,
@@ -169,6 +167,7 @@ impl State {
         let mut ui = UiState {
             frame_ms: 16.7,
             show_preview: true,
+            canvas: CanvasChoice::new(canvas::DEFAULT, max_texture_side),
             ..Default::default()
         };
         let image = match initial_image {
@@ -185,7 +184,7 @@ impl State {
             },
             None => test_card(&mut ui),
         };
-        let renderer = Renderer::new(&device, &queue, composite_format, INTERNAL_SIZE, &image);
+        let renderer = Renderer::new(&device, &queue, composite_format, canvas::DEFAULT, &image);
 
         let egui_ctx = egui::Context::default();
         let egui_state = egui_winit::State::new(
@@ -198,7 +197,8 @@ impl State {
         );
         let mut egui_renderer =
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
-        let preview = PreviewView::new(&device, &queue, &mut egui_renderer, INTERNAL_SIZE, &image);
+        let preview =
+            PreviewView::new(&device, &queue, &mut egui_renderer, canvas::DEFAULT, &image);
 
         Ok(Self {
             window,
@@ -311,6 +311,12 @@ impl State {
             }
         }
 
+        if let Some(size) = actions.apply_canvas {
+            self.renderer.resize(&self.device, size);
+            self.preview
+                .resize(&self.device, &mut self.egui_renderer, size);
+            self.ui.canvas.current = size;
+        }
         let frame_params = self.motion.frame();
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if actions.clear_feedback {

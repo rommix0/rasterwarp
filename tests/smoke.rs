@@ -57,6 +57,36 @@ fn renders_frames_offscreen() {
 }
 
 #[test]
+fn renders_after_a_canvas_resize() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, (640, 360), &test_card(400, 300));
+    renderer.resize(&device, (256, 192));
+    assert_eq!(renderer.size(), (256, 192));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &frame_params,
+        0.0,
+        &output.view,
+        (OUT_W, OUT_H),
+    );
+    queue.submit([encoder.finish()]);
+    let pixels = read_back(&device, &queue, &output.texture);
+    let (rgba, _) = pixels.as_chunks::<4>();
+    assert!(
+        rgba.iter().any(|px| *px != rgba[0]),
+        "output is a single flat color"
+    );
+}
+
+#[test]
 fn renders_the_preview_offscreen() {
     let Some((device, queue)) = device() else {
         return;
