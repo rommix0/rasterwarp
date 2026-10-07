@@ -232,6 +232,85 @@ mod tests {
         assert!(step < 0.1, "phase jumped by {step}");
     }
 
+    /// Signed shortest step between two wrapped phases.
+    fn phase_step(before: f32, after: f32) -> f32 {
+        (after - before + 0.5).rem_euclid(1.0) - 0.5
+    }
+
+    fn osc0_phase(m: &Motion) -> f32 {
+        m.frame().warp.oscillators[0].phase
+    }
+
+    #[test]
+    fn forward_cut_mid_ramp_hands_the_destination_clock_to_rest() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Transition);
+        m.editable().warp.oscillators[0].phase_speed = 2.0;
+        m.advance(0.3);
+        m.trigger();
+        m.advance(1.0); // halfway through the ramp
+        m.cut();
+        assert_eq!(m.ab.on_air, 1);
+        // The destination's clock (0.15 at the trigger, then 2 cycles/s) is on screen.
+        let expected = |secs: f64| (0.15 + 2.0 * secs).rem_euclid(1.0) as f32;
+        assert!(phase_step(osc0_phase(&m), expected(1.0)).abs() < 1e-3);
+        let mut last = osc0_phase(&m);
+        for _ in 0..100 {
+            m.advance(0.01);
+            let now = osc0_phase(&m);
+            assert!(phase_step(last, now).abs() < 0.1, "phase jumped after cut");
+            last = now;
+        }
+        assert!(phase_step(last, expected(2.0)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn sequence_ramp_finishing_keeps_phase_continuous() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Sequence);
+        let seq = m.sequence_mut();
+        seq.add_cue();
+        seq.selected_cue_mut().params.warp.oscillators[0].phase_speed = 3.0;
+        seq.set_start_frame(1, 24);
+        seq.set_duration(1, 24);
+        seq.run();
+        let mut last = osc0_phase(&m);
+        for _ in 0..250 {
+            // Frames 0..60: crosses RampStarted (24) and RampFinished (48).
+            m.advance(0.01);
+            let now = osc0_phase(&m);
+            assert!(phase_step(last, now).abs() < 0.1, "phase jumped");
+            last = now;
+        }
+        assert!(
+            !matches!(m.sequence.as_ref().unwrap().view(), SeqView::Ramp { .. }),
+            "ramp finished"
+        );
+    }
+
+    #[test]
+    fn reversed_transition_reverts_without_changing_banks_or_phase() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Transition);
+        m.editable().warp.oscillators[0].phase_speed = 2.0;
+        m.advance(0.3);
+        m.trigger();
+        m.advance(0.5);
+        m.trigger(); // reverse
+        assert!(!m.ab.ramp().unwrap().forward);
+        let mut last = osc0_phase(&m);
+        let mut steps = 0;
+        while m.ab.ramp().is_some() {
+            m.advance(0.01);
+            let now = osc0_phase(&m);
+            assert!(phase_step(last, now).abs() < 0.1, "phase jumped");
+            last = now;
+            steps += 1;
+            assert!(steps < 1000, "never reverted");
+        }
+        assert_eq!(m.ab.on_air, 0, "on-air bank unchanged");
+    }
+
     #[test]
     fn leaving_sequence_puts_shown_cue_on_air() {
         let mut m = Motion::new(Params::default());

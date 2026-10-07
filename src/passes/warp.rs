@@ -165,4 +165,22 @@ mod tests {
         assert_eq!(u.osc[0].wave[1], p.warp.oscillators[0].amplitude);
         assert_eq!(u.osc[4].wave, [0.0; 4], "unused slots are zero");
     }
+
+    #[test]
+    fn packs_all_eight_slots_when_every_oscillator_crossfades() {
+        let mut a = Params::default();
+        let mut b = Params::default();
+        for (oa, ob) in a.warp.oscillators.iter_mut().zip(&mut b.warp.oscillators) {
+            oa.amplitude = 0.05;
+            oa.waveform = Waveform::Sine;
+            ob.amplitude = 0.05;
+            ob.waveform = Waveform::Square;
+        }
+        let clocks = crate::blend::Clocks::default();
+        let frame = crate::blend::blend(&a, &b, 0.5, Some(0.5), &clocks, &clocks);
+        assert_eq!(frame.warp.oscillators.len(), MAX_SLOTS);
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0);
+        assert_eq!(u.frame[3], MAX_SLOTS as f32, "slot count");
+        assert!(u.osc[MAX_SLOTS - 1].wave[1] > 0.0, "last slot is packed");
+    }
 }
