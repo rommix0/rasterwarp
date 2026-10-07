@@ -78,6 +78,32 @@ impl OscInput {
     pub const ALL: [OscInput; 4] = [OscInput::U, OscInput::V, OscInput::Radius, OscInput::Time];
 }
 
+/// How an oscillator's phase moves over time (the manual's sync modes).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OscSync {
+    /// Phase advances at `phase_speed`: the wave drifts.
+    Free,
+    /// Phase is locked to the frame: the wave stands still.
+    Frame,
+}
+
+impl OscSync {
+    pub const ALL: [OscSync; 2] = [OscSync::Free, OscSync::Frame];
+}
+
+/// How an oscillator's amplitude behaves while a transition or sequence ramp runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Envelope {
+    /// Always at its set amplitude.
+    Constant,
+    /// Silent at rest; swells to its amplitude in the middle of a ramp.
+    Swell,
+}
+
+impl Envelope {
+    pub const ALL: [Envelope; 2] = [Envelope::Constant, Envelope::Swell];
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Oscillator {
     pub waveform: Waveform,
@@ -95,6 +121,8 @@ pub struct Oscillator {
     pub lfo_rate: f32,
     /// 0 = constant amplitude, 1 = amplitude swings fully between 0 and `amplitude`.
     pub lfo_depth: f32,
+    pub sync: OscSync,
+    pub envelope: Envelope,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -107,6 +135,9 @@ pub struct WarpParams {
     pub offset: [f32; 2],
     /// Slow random wobble of oscillator frequency and phase.
     pub drift: f32,
+    /// Oscillator 4 follows oscillator 3 a quarter cycle behind (sine/cosine pair),
+    /// keeping its own target and amplitude.
+    pub slave_4_to_3: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -161,6 +192,8 @@ impl Default for Oscillator {
             phase_speed: 0.0,
             lfo_rate: 0.0,
             lfo_depth: 0.0,
+            sync: OscSync::Free,
+            envelope: Envelope::Constant,
         }
     }
 }
@@ -203,6 +236,7 @@ impl Default for Params {
                 rotation: 0.0,
                 offset: [0.0, 0.0],
                 drift: 0.2,
+                slave_4_to_3: false,
             },
             colorize: ColorizeParams {
                 levels: 6,
@@ -235,6 +269,29 @@ impl Default for Params {
                 noise: 0.04,
             },
         }
+    }
+}
+
+impl WarpParams {
+    /// The oscillators as they actually run, with oscillator 4 resolved when it is
+    /// slaved to oscillator 3. Each entry also names the phase clock it uses.
+    pub fn effective_oscillators(&self) -> [(Oscillator, usize); OSCILLATOR_COUNT] {
+        let mut out = std::array::from_fn(|i| (self.oscillators[i], i));
+        if self.slave_4_to_3 {
+            let master = self.oscillators[2];
+            let own = self.oscillators[3];
+            out[3] = (
+                Oscillator {
+                    target: own.target,
+                    amplitude: own.amplitude,
+                    envelope: own.envelope,
+                    phase: master.phase + 0.25,
+                    ..master
+                },
+                2,
+            );
+        }
+        out
     }
 }
 
@@ -302,6 +359,42 @@ mod tests {
                 .iter()
                 .any(|o| o.amplitude > 0.0 && o.phase_speed != 0.0)
         );
+    }
+
+    #[test]
+    fn slaved_oscillator_follows_master_a_quarter_cycle_behind() {
+        let mut w = Params::default().warp;
+        w.oscillators[2] = Oscillator {
+            waveform: Waveform::Triangle,
+            frequency: 5.0,
+            phase: 0.1,
+            phase_speed: 0.7,
+            ..Oscillator::default()
+        };
+        w.oscillators[3] = Oscillator {
+            target: Axis::Y,
+            amplitude: 0.2,
+            ..Oscillator::default()
+        };
+        w.slave_4_to_3 = true;
+        let (osc4, clock) = w.effective_oscillators()[3];
+        assert_eq!(clock, 2);
+        assert_eq!(osc4.waveform, Waveform::Triangle);
+        assert_eq!(osc4.frequency, 5.0);
+        assert_eq!(osc4.phase_speed, 0.7);
+        assert!((osc4.phase - 0.35).abs() < 1e-6);
+        assert_eq!(osc4.target, Axis::Y);
+        assert_eq!(osc4.amplitude, 0.2);
+    }
+
+    #[test]
+    fn unslaved_oscillators_use_their_own_clocks() {
+        let w = Params::default().warp;
+        let eff = w.effective_oscillators();
+        for (i, (osc, clock)) in eff.iter().enumerate() {
+            assert_eq!(*clock, i);
+            assert_eq!(*osc, w.oscillators[i]);
+        }
     }
 
     #[test]
