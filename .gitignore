@@ -1,3 +1,5 @@
 /target
 /.claude/worktrees/
 /.superpowers/
+/session_memory.json
+/manuals/
