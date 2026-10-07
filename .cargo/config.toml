@@ -1,0 +1,6 @@
+# Machine-specific paths for linking FFmpeg (video capture). Adjust these when building
+# elsewhere: FFMPEG_DIR is a shared FFmpeg 9 build (with bin/, include/ and lib/), and
+# LIBCLANG_PATH is any libclang that bindgen can load (the one bundled with Visual Studio works).
+[env]
+FFMPEG_DIR = 'C:\Users\abart\Desktop\ffmpeg-9.0.2-full_build-shared'
+LIBCLANG_PATH = 'C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Tools\Llvm\x64\bin'
