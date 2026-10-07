@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::encode::{Encoder, Frame, VideoFormat};
 use super::readback::Readback;
@@ -107,8 +107,9 @@ impl Recorder {
             CaptureMode::RealTime => self.dropped += 1,
             CaptureMode::Offline => {
                 self.deliver(device, true)?;
-                let copied = self.readback.copy(encoder, pts);
-                debug_assert!(copied, "a staging buffer is free after waiting");
+                if !self.readback.copy(encoder, pts) {
+                    bail!("no capture buffer came free");
+                }
             }
         }
         Ok(())
@@ -159,7 +160,7 @@ impl Recorder {
         let spare = &mut self.spare;
         let frames = self
             .readback
-            .collect(device, wait, || spare.pop().unwrap_or_default());
+            .collect(device, wait, || spare.pop().unwrap_or_default())?;
         let blocking = wait || self.mode == CaptureMode::Offline;
         for frame in frames {
             self.send(frame, blocking)?;

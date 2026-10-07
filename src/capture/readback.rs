@@ -3,7 +3,9 @@
 //! asynchronously and read a frame or two later.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
+
+use anyhow::{Result, anyhow, bail};
 
 use super::encode::Frame;
 use super::{padded_bytes_per_row, unpad};
@@ -12,6 +14,11 @@ use crate::passes::CAPTURE_FORMAT;
 
 /// Staging buffers in the ring.
 pub const SLOTS: usize = 3;
+
+/// What a staging buffer's map request came back with.
+const PENDING: u8 = 0;
+const READY: u8 = 1;
+const FAILED: u8 = 2;
 
 /// Where one staging buffer is in its round trip.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +94,7 @@ impl Ring {
 pub struct Readback {
     target: RenderTarget,
     buffers: Vec<wgpu::Buffer>,
-    mapped: Vec<Arc<AtomicBool>>,
+    mapped: Vec<Arc<AtomicU8>>,
     ring: Ring,
     size: (u32, u32),
 }
@@ -110,7 +117,7 @@ impl Readback {
             target: RenderTarget::new(device, "capture", size.0, size.1, CAPTURE_FORMAT),
             buffers,
             mapped: (0..SLOTS)
-                .map(|_| Arc::new(AtomicBool::new(false)))
+                .map(|_| Arc::new(AtomicU8::new(PENDING)))
                 .collect(),
             ring: Ring::default(),
             size,
@@ -148,11 +155,12 @@ impl Readback {
     pub fn after_submit(&mut self) {
         for slot in self.ring.start_mapping() {
             let mapped = self.mapped[slot].clone();
-            mapped.store(false, Ordering::Release);
+            mapped.store(PENDING, Ordering::Release);
             self.buffers[slot].map_async(wgpu::MapMode::Read, .., move |result| {
-                if result.is_ok() {
-                    mapped.store(true, Ordering::Release);
-                }
+                mapped.store(
+                    if result.is_ok() { READY } else { FAILED },
+                    Ordering::Release,
+                );
             });
         }
     }
@@ -163,25 +171,28 @@ impl Readback {
     }
 
     /// Returns the frames that have arrived, oldest first. With `wait`, blocks until
-    /// everything submitted so far has arrived. `buffer` supplies reusable memory.
+    /// everything submitted so far has arrived, and fails if anything is still outstanding
+    /// afterwards. Fails if the GPU could not map a buffer. `buffer` supplies reusable memory.
     pub fn collect(
         &mut self,
         device: &wgpu::Device,
         wait: bool,
         mut buffer: impl FnMut() -> Vec<u8>,
-    ) -> Vec<Frame> {
+    ) -> Result<Vec<Frame>> {
         let poll = if wait {
             wgpu::PollType::wait_indefinitely()
         } else {
             wgpu::PollType::Poll
         };
-        if let Err(err) = device.poll(poll) {
-            log::warn!("capture readback poll failed: {err}");
-        }
+        device
+            .poll(poll)
+            .map_err(|err| anyhow!("capture readback failed: {err}"))?;
         let mut frames = Vec::new();
         while let Some((slot, pts)) = self.ring.oldest_mapping() {
-            if !self.mapped[slot].load(Ordering::Acquire) {
-                break;
+            match self.mapped[slot].load(Ordering::Acquire) {
+                READY => {}
+                FAILED => bail!("reading a captured frame back from the GPU failed"),
+                _ => break,
             }
             let mut rgba = buffer();
             {
@@ -194,7 +205,10 @@ impl Readback {
             self.ring.release(slot);
             frames.push(Frame { pts, rgba });
         }
-        frames
+        if wait && self.is_busy() {
+            bail!("captured frames did not come back from the GPU");
+        }
+        Ok(frames)
     }
 }
 

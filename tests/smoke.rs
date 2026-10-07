@@ -176,6 +176,60 @@ fn records_every_frame_offline() {
 }
 
 #[test]
+fn offline_capture_waits_for_the_gpu_instead_of_dropping() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let folder = std::env::temp_dir().join(format!("rasterwarp-wait-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&folder);
+    let settings = RecordSettings {
+        format: VideoFormat::Ffv1,
+        mode: CaptureMode::Offline,
+        folder: folder.clone(),
+        stop_after: 0.0,
+    };
+    let canvas = (256, 144);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, canvas, &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut recorder = Recorder::start(&device, &settings, canvas, 0.0).expect("start recording");
+    // No pump: the ring fills after 3 frames, so capture must wait for the GPU.
+    for frame in 0..8 {
+        let time = f64::from(frame) * f64::from(OFFLINE_STEP);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &frame_params,
+            time as f32,
+            &output.view,
+            (OUT_W, OUT_H),
+        );
+        recorder
+            .capture(&device, &mut encoder, time, |encoder, view| {
+                renderer.composite_capture(
+                    &device,
+                    &queue,
+                    encoder,
+                    &frame_params,
+                    time as f32,
+                    view,
+                )
+            })
+            .expect("capture");
+        queue.submit([encoder.finish()]);
+        recorder.after_submit();
+    }
+    let status = recorder.finish(&device).expect("finish recording");
+    assert_eq!(status.frames, 8);
+    assert_eq!(status.dropped, 0);
+    assert!(status.path.starts_with(&folder));
+    assert!(std::fs::metadata(&status.path).expect("file written").len() > 0);
+}
+
+#[test]
 fn real_time_capture_counts_frames_it_has_to_drop() {
     let Some((device, queue)) = device() else {
         return;
