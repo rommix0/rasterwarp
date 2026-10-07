@@ -170,7 +170,7 @@ A small live view of what you're editing but isn't on air yet, in the bottom-rig
   - A mapped frame is un-padded and sent through a **bounded channel (capacity 4)** to the encoder thread.
   - If the channel is full, the frame is **dropped and counted**. Rendering never blocks on encoding.
 - **Timing:**
-  - A frame is captured only when `floor(time · 60)` advances, and its pts is that frame number. Pausing stops the clock, so it also stops new frames.
+  - A frame is captured only when `time · 60`, rounded to the nearest frame, advances, and its pts is that frame number. Pausing stops the clock, so it also stops new frames.
   - This gives clean 60 fps output whatever the display refresh rate, as long as the display runs at 60 Hz or faster.
   - If rendering runs below 60 fps, frames are missing and the pts gaps make the encoder hold the previous frame. The panel warns about this.
 - **Offline (frame-accurate) mode:** a capture-mode choice of **Real-time** (default, as above) or **Offline**.

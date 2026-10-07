@@ -61,9 +61,10 @@ impl FrameClock {
     }
 
     /// The timestamp for a frame rendered at animation time `time`, or `None` to skip it.
-    /// Real-time mode records a frame whenever `floor((time − start) · 60)` moves on, so a
-    /// faster display is decimated to 60 fps and a slow one leaves gaps. Offline mode
-    /// records every frame whose time has moved on (so pausing records nothing).
+    /// Real-time mode records a frame whenever `(time − start) · 60`, rounded to the nearest
+    /// frame, moves on (rounding keeps a 60 Hz display's jittery frame times inside their own
+    /// frame). Offline mode records every frame whose time has moved on (so pausing records
+    /// nothing).
     pub fn frame_due(&mut self, time: f64) -> Option<i64> {
         let pts = match self.mode {
             CaptureMode::Offline => {
@@ -73,8 +74,7 @@ impl FrameClock {
                 self.next
             }
             CaptureMode::RealTime => {
-                // The small bias keeps exact multiples of 1/60 s from rounding down.
-                let n = ((time - self.start) * f64::from(FPS) + 1e-6).floor() as i64;
+                let n = ((time - self.start) * f64::from(FPS) + 0.5).floor() as i64;
                 if n < self.next {
                     return None;
                 }
@@ -141,11 +141,22 @@ mod tests {
     #[test]
     fn real_time_capture_decimates_a_fast_display_to_60_fps() {
         let mut clock = FrameClock::new(CaptureMode::RealTime, 10.0);
-        let captured: Vec<i64> = (0..144)
+        let captured: Vec<i64> = (0..143)
             .filter_map(|i| clock.frame_due(10.0 + f64::from(i) / 144.0))
             .collect();
         assert_eq!(captured, (0..60).collect::<Vec<_>>());
         assert!((clock.seconds() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn real_time_capture_keeps_every_frame_of_a_jittery_60_hz_display() {
+        let mut clock = FrameClock::new(CaptureMode::RealTime, 10.0);
+        // ±0.3 ms of timestamp noise around exact 60 Hz frame times.
+        let jitter = [0.0003, -0.0003, 0.0001, -0.0002, 0.0];
+        let captured: Vec<i64> = (0..600)
+            .filter_map(|i| clock.frame_due(10.0 + f64::from(i) / 60.0 + jitter[i as usize % 5]))
+            .collect();
+        assert_eq!(captured, (0..600).collect::<Vec<_>>());
     }
 
     #[test]
