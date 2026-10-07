@@ -99,10 +99,15 @@ pub struct Readback {
     size: (u32, u32),
 }
 
+/// Bytes in one staging buffer for a capture of `size`.
+pub fn staging_bytes(size: (u32, u32)) -> u64 {
+    u64::from(padded_bytes_per_row(size.0)) * u64::from(size.1)
+}
+
 impl Readback {
     /// A capture texture of `size` in [`CAPTURE_FORMAT`], plus the staging ring.
     pub fn new(device: &wgpu::Device, size: (u32, u32)) -> Self {
-        let bytes = u64::from(padded_bytes_per_row(size.0)) * u64::from(size.1);
+        let bytes = staging_bytes(size);
         let buffers = (0..SLOTS)
             .map(|_| {
                 device.create_buffer(&wgpu::BufferDescriptor {
@@ -215,6 +220,12 @@ impl Readback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staging_buffers_hold_padded_rows() {
+        assert_eq!(staging_bytes((1920, 1080)), 7680 * 1080);
+        assert!(staging_bytes((10000, 7000)) > 256 << 20);
+    }
 
     #[test]
     fn slots_are_used_in_rotation() {

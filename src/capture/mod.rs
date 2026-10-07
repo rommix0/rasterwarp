@@ -40,6 +40,24 @@ pub fn file_name(now: chrono::NaiveDateTime, format: VideoFormat) -> String {
     )
 }
 
+/// `folder/name`, or `folder/stem-2.ext`, `stem-3.ext`, … if that file already exists.
+pub fn unused_path(folder: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let first = folder.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let path = std::path::Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map_or_else(String::new, |e| format!(".{e}"));
+    (2..)
+        .map(|n| folder.join(format!("{stem}-{n}{ext}")))
+        .find(|p| !p.exists())
+        .expect("an unbounded range always finds a free name")
+}
+
 /// Decides which rendered frames are recorded and their timestamps (in frames at 60 fps).
 #[derive(Clone, Debug)]
 pub struct FrameClock {
@@ -138,6 +156,18 @@ mod tests {
             file_name(t, VideoFormat::Ffv1),
             "rasterwarp-20261007-090503.mkv"
         );
+    }
+
+    #[test]
+    fn a_taken_file_name_gets_a_numeric_suffix() {
+        let folder = std::env::temp_dir().join(format!("rasterwarp-unused-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        assert_eq!(unused_path(&folder, "a.mp4"), folder.join("a.mp4"));
+        std::fs::write(folder.join("a.mp4"), b"").unwrap();
+        assert_eq!(unused_path(&folder, "a.mp4"), folder.join("a-2.mp4"));
+        std::fs::write(folder.join("a-2.mp4"), b"").unwrap();
+        assert_eq!(unused_path(&folder, "a.mp4"), folder.join("a-3.mp4"));
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 
     #[test]

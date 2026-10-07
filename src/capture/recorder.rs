@@ -7,8 +7,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 
 use super::encode::{Encoder, Frame, VideoFormat};
-use super::readback::Readback;
-use super::{CaptureMode, FrameClock, file_name};
+use super::readback::{Readback, staging_bytes};
+use super::{CaptureMode, FrameClock, file_name, unused_path};
 
 /// What the panel chose before pressing Record.
 #[derive(Clone, Debug)]
@@ -57,10 +57,17 @@ impl Recorder {
         canvas: (u32, u32),
         time: f64,
     ) -> Result<Self> {
+        if staging_bytes(canvas) > device.limits().max_buffer_size {
+            bail!(
+                "{}×{} is too large to record on this GPU; choose a smaller canvas",
+                canvas.0,
+                canvas.1
+            );
+        }
         std::fs::create_dir_all(&settings.folder)
             .with_context(|| format!("could not create {}", settings.folder.display()))?;
         let now = chrono::Local::now().naive_local();
-        let path = settings.folder.join(file_name(now, settings.format));
+        let path = unused_path(&settings.folder, &file_name(now, settings.format));
         let encoder = Encoder::start(&path, settings.format, canvas)?;
         Ok(Self {
             encoder,
