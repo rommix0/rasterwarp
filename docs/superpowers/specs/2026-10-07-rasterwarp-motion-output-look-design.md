@@ -134,7 +134,7 @@ These findings from the manuals shape the design. Page references are in the res
 A small live view of what you're editing but isn't on air yet, in the bottom-right corner of the window.
 
 - **What it shows:** `Motion::preview() -> Option<(FrameParams, PreviewLabel)>`.
-  - **Transition mode:** the off-air bank ("Off-air: A" / "Off-air: B"), which is what Transition would bring in. During a ramp it keeps showing the destination. When the ramp finishes, it shows the new off-air bank (the one just left).
+  - **Transition mode:** the off-air bank ("Off-air: A" / "Off-air: B"), the one the panel edits and Transition would bring in. During a ramp it keeps showing that bank (a forward ramp's destination). When the ramp finishes, it shows the new off-air bank (the one just left).
   - **Sequence mode:** the selected cue ("Cue N") while the sequence is running. When stopped, the output already shows the selected cue, so there's no preview.
   - **Live mode:** no preview.
 - **Rendering:** a second instance of the existing `Renderer`, with its own feedback trails and bloom, at a preview size of 480 px wide with the canvas's aspect ratio (480×270 at 16:9; even height, at least 64). It draws into an offscreen `Rgba8UnormSrgb` texture, which egui shows as a framed overlay with the label, anchored in the bottom-right corner of the window with a small margin.
