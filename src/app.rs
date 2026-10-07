@@ -275,6 +275,8 @@ impl State {
             self.time,
         ) {
             Ok(recorder) => {
+                // Opening the encoder stalls; that must not count as animation time.
+                self.last_frame = Instant::now();
                 self.ui.capture.error = None;
                 self.ui.capture.status = Some(recorder.status());
                 self.recorder = Some(recorder);
@@ -292,7 +294,10 @@ impl State {
             return;
         };
         self.ui.capture.status = None;
-        match recorder.finish(&self.device) {
+        let result = recorder.finish(&self.device);
+        // Flushing the encoder stalls; that must not count as animation time.
+        self.last_frame = Instant::now();
+        match result {
             Ok(status) => {
                 self.ui.capture.saved = Some(format!(
                     "Saved {} ({:.1} s, {} frames, {} dropped)",
