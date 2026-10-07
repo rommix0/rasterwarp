@@ -14,6 +14,8 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::canvas::{self, CanvasChoice};
+use crate::capture::recorder::Recorder;
+use crate::capture::{CaptureMode, OFFLINE_STEP};
 use crate::gpu;
 use crate::motion::Motion;
 use crate::params::Params;
@@ -64,7 +66,10 @@ impl ApplicationHandler for App {
         let Some(state) = &mut self.state else { return };
         let response = state.egui_state.on_window_event(&state.window, &event);
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                state.stop_recording(); // finish the file before exiting
+                event_loop.exit();
+            }
             WindowEvent::Resized(size) => state.resize(size),
             WindowEvent::DroppedFile(path) => state.load_source(&path),
             // Space triggers a transition unless egui is using the keyboard (e.g. a text field).
@@ -100,6 +105,7 @@ struct State {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     motion: Motion,
+    recorder: Option<Recorder>,
     ui: UiState,
     time: f64,
     last_frame: Instant,
@@ -214,6 +220,7 @@ impl State {
             egui_state,
             egui_renderer,
             motion: Motion::new(Params::default()),
+            recorder: None,
             ui,
             time: 0.0,
             last_frame: Instant::now(),
@@ -243,17 +250,83 @@ impl State {
         }
     }
 
+    /// Advances animation time: by the frame time, or by exactly 1/60 s per frame while
+    /// recording offline.
+    fn advance_animation(&mut self, dt: f32) {
+        if self.ui.paused {
+            return;
+        }
+        let offline = self
+            .recorder
+            .as_ref()
+            .is_some_and(|r| r.mode() == CaptureMode::Offline);
+        // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
+        let step = if offline { OFFLINE_STEP } else { dt.min(0.1) };
+        self.time += f64::from(step);
+        self.motion.advance(step);
+    }
+
+    fn start_recording(&mut self) {
+        self.ui.capture.saved = None;
+        match Recorder::start(
+            &self.device,
+            &self.ui.capture.settings,
+            self.renderer.size(),
+            self.time,
+        ) {
+            Ok(recorder) => {
+                self.ui.capture.error = None;
+                self.ui.capture.status = Some(recorder.status());
+                self.recorder = Some(recorder);
+            }
+            Err(err) => {
+                log::warn!("{err:#}");
+                self.ui.capture.error = Some(format!("{err:#}"));
+            }
+        }
+    }
+
+    /// Finishes the current recording, if any, and reports how it went.
+    fn stop_recording(&mut self) {
+        let Some(recorder) = self.recorder.take() else {
+            return;
+        };
+        self.ui.capture.status = None;
+        match recorder.finish(&self.device) {
+            Ok(status) => {
+                self.ui.capture.saved = Some(format!(
+                    "Saved {} ({:.1} s, {} frames, {} dropped)",
+                    status.path.display(),
+                    status.seconds,
+                    status.frames,
+                    status.dropped
+                ));
+            }
+            Err(err) => {
+                log::warn!("{err:#}");
+                self.ui.capture.error = Some(format!("Recording stopped: {err:#}"));
+            }
+        }
+    }
+
+    fn choose_capture_folder(&mut self) {
+        let folder = &mut self.ui.capture.settings.folder;
+        let mut dialog = rfd::FileDialog::new().set_title("Capture folder");
+        if let Ok(start) = std::path::absolute(&*folder)
+            && start.is_dir()
+        {
+            dialog = dialog.set_directory(start);
+        }
+        if let Some(picked) = dialog.pick_folder() {
+            *folder = picked;
+        }
+    }
+
     fn redraw(&mut self) {
         let now = Instant::now();
         let dt = (now - self.last_frame).as_secs_f32();
         self.last_frame = now;
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
-        if !self.ui.paused {
-            // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
-            let step = dt.min(0.1);
-            self.time += f64::from(step);
-            self.motion.advance(step);
-        }
 
         if self.config.width == 0 || self.config.height == 0 {
             return; // minimized
@@ -271,6 +344,14 @@ impl State {
                 return;
             }
         };
+        // Animation moves only for frames that are drawn, so offline recordings stay exact.
+        self.advance_animation(dt);
+        if let Some(recorder) = &mut self.recorder
+            && let Err(err) = recorder.pump(&self.device)
+        {
+            log::warn!("{err:#}");
+            self.stop_recording();
+        }
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -311,11 +392,22 @@ impl State {
             }
         }
 
-        if let Some(size) = actions.apply_canvas {
+        if actions.choose_folder {
+            self.choose_capture_folder();
+        }
+        if actions.stop_recording {
+            self.stop_recording();
+        }
+        if let Some(size) = actions.apply_canvas
+            && self.recorder.is_none()
+        {
             self.renderer.resize(&self.device, size);
             self.preview
                 .resize(&self.device, &mut self.egui_renderer, size);
             self.ui.canvas.current = size;
+        }
+        if actions.start_recording && self.recorder.is_none() {
+            self.start_recording();
         }
         let frame_params = self.motion.frame();
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -347,6 +439,18 @@ impl State {
             ),
             None => self.preview.hide(),
         }
+        let mut capture_failed = false;
+        if let Some(recorder) = &mut self.recorder {
+            let (device, queue, renderer, time) =
+                (&self.device, &self.queue, &self.renderer, self.time);
+            let captured = recorder.capture(device, &mut encoder, time, |encoder, view| {
+                renderer.composite_capture(device, queue, encoder, &frame_params, time as f32, view)
+            });
+            if let Err(err) = captured {
+                log::warn!("{err:#}");
+                capture_failed = true;
+            }
+        }
         let egui_commands = self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -377,6 +481,13 @@ impl State {
         }
         self.queue
             .submit(egui_commands.into_iter().chain([encoder.finish()]));
+        if let Some(recorder) = &mut self.recorder {
+            recorder.after_submit();
+            self.ui.capture.status = Some(recorder.status());
+            if capture_failed || recorder.finished_recording() {
+                self.stop_recording();
+            }
+        }
         self.window.pre_present_notify();
         self.queue.present(frame);
         for id in &egui_output.textures_delta.free {

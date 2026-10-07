@@ -1,8 +1,13 @@
 //! The egui parameter panel.
 
+use std::path::PathBuf;
+
 use egui::{Button, CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
 use crate::canvas::{CanvasChoice, PRESETS};
+use crate::capture::CaptureMode;
+use crate::capture::encode::VideoFormat;
+use crate::capture::recorder::{RecordSettings, RecordStatus};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::motion::{Mode, Motion};
@@ -23,6 +28,34 @@ pub struct UiState {
     /// The user curve open in the curve editor.
     pub editing_curve: Option<u32>,
     pub canvas: CanvasChoice,
+    pub capture: CaptureUi,
+}
+
+/// The capture controls and what the current or last recording reported.
+#[derive(Clone, Debug)]
+pub struct CaptureUi {
+    pub settings: RecordSettings,
+    /// Progress while recording.
+    pub status: Option<RecordStatus>,
+    /// What the last recording saved.
+    pub saved: Option<String>,
+    pub error: Option<String>,
+}
+
+impl Default for CaptureUi {
+    fn default() -> Self {
+        Self {
+            settings: RecordSettings {
+                format: VideoFormat::Hevc,
+                mode: CaptureMode::RealTime,
+                folder: PathBuf::from("captures"),
+                stop_after: 0.0,
+            },
+            status: None,
+            saved: None,
+            error: None,
+        }
+    }
 }
 
 /// The off-air preview as the panel shows it.
@@ -42,6 +75,9 @@ pub struct UiActions {
     pub clear_feedback: bool,
     /// Switch the canvas to this size.
     pub apply_canvas: Option<(u32, u32)>,
+    pub start_recording: bool,
+    pub stop_recording: bool,
+    pub choose_folder: bool,
 }
 
 pub fn draw(
@@ -75,7 +111,9 @@ pub fn draw(
                         actions.clear_feedback = true;
                     }
                 });
-                canvas_section(ui, &mut state.canvas, &mut actions);
+                let recording = state.capture.status.is_some();
+                capture_section(ui, &mut state.capture, state.frame_ms, &mut actions);
+                canvas_section(ui, &mut state.canvas, recording, &mut actions);
                 mode_section(ui, motion);
                 curves_section(ui, &mut motion.curves, state);
                 let params = motion.editable();
@@ -105,7 +143,82 @@ fn preview_overlay(ctx: &egui::Context, preview: &PreviewOverlay) {
         });
 }
 
-fn canvas_section(ui: &mut Ui, canvas: &mut CanvasChoice, actions: &mut UiActions) {
+fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, frame_ms: f32, actions: &mut UiActions) {
+    CollapsingHeader::new("Capture")
+        .default_open(true)
+        .show(ui, |ui| {
+            let settings = &mut capture.settings;
+            ui.add_enabled_ui(capture.status.is_none(), |ui| {
+                ComboBox::from_id_salt("capture format")
+                    .selected_text(settings.format.label())
+                    .show_ui(ui, |ui| {
+                        for format in VideoFormat::ALL {
+                            ui.selectable_value(&mut settings.format, format, format.label());
+                        }
+                    });
+                ComboBox::from_id_salt("capture mode")
+                    .selected_text(settings.mode.label())
+                    .show_ui(ui, |ui| {
+                        for mode in CaptureMode::ALL {
+                            ui.selectable_value(&mut settings.mode, mode, mode.label());
+                        }
+                    });
+                ui.horizontal(|ui| {
+                    ui.label("Stop after");
+                    ui.add(
+                        egui::DragValue::new(&mut settings.stop_after)
+                            .range(0.0..=3600.0)
+                            .speed(0.1)
+                            .suffix(" s"),
+                    );
+                    ui.small("(0 = stop by hand)");
+                });
+                ui.horizontal(|ui| {
+                    ui.label(format!("Folder: {}", settings.folder.display()));
+                    if ui.button("Choose…").clicked() {
+                        actions.choose_folder = true;
+                    }
+                });
+            });
+            match &capture.status {
+                None => {
+                    if ui.button("Record").clicked() {
+                        actions.start_recording = true;
+                    }
+                }
+                Some(status) => {
+                    if ui.button("Stop recording").clicked() {
+                        actions.stop_recording = true;
+                    }
+                    ui.label(format!(
+                        "{:.1} s · {} frames · {} dropped",
+                        status.seconds, status.frames, status.dropped
+                    ));
+                    if let Some(speed) = status.speed {
+                        ui.label(format!("offline: {speed:.2}× realtime"));
+                    } else if frame_ms > 1000.0 / 60.0 * 1.05 {
+                        ui.colored_label(
+                            egui::Color32::YELLOW,
+                            "Rendering is below 60 fps, so frames will be missing.                              Offline mode records every frame.",
+                        );
+                    }
+                }
+            }
+            if let Some(saved) = &capture.saved {
+                ui.small(saved);
+            }
+            if let Some(err) = &capture.error {
+                ui.colored_label(egui::Color32::LIGHT_RED, err);
+            }
+        });
+}
+
+fn canvas_section(
+    ui: &mut Ui,
+    canvas: &mut CanvasChoice,
+    recording: bool,
+    actions: &mut UiActions,
+) {
     CollapsingHeader::new("Canvas").show(ui, |ui| {
         let name = |i: usize| match PRESETS.get(i) {
             Some((name, (w, h))) => format!("{name} ({w}×{h})"),
@@ -131,12 +244,16 @@ fn canvas_section(ui: &mut Ui, canvas: &mut CanvasChoice, actions: &mut UiAction
         ui.horizontal(|ui| {
             let changed = (w, h) != canvas.current;
             if ui
-                .add_enabled(changed, Button::new(format!("Apply {w}×{h}")))
+                .add_enabled(changed && !recording, Button::new(format!("Apply {w}×{h}")))
                 .clicked()
             {
                 actions.apply_canvas = Some((w, h));
             }
-            ui.small("clears the trails");
+            ui.small(if recording {
+                "stop recording to change"
+            } else {
+                "clears the trails"
+            });
         });
     });
 }
