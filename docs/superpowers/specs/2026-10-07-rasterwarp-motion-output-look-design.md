@@ -1,7 +1,7 @@
 # Rasterwarp: Motion, Output and Look: Design
 
 Date: 2026-10-07
-Status: Draft for review
+Status: Approved 2026-10-07
 Builds on: `docs/superpowers/specs/2026-10-06-rasterwarp-prototype-design.md` (the prototype, now on `main`)
 Research: `docs/research/scanimate-manuals/` (notes taken from the three scanned manuals in `manuals/`)
 
@@ -12,7 +12,7 @@ Six features, delivered as three implementation plans. Each plan leaves the app 
 | Plan | Features |
 |---|---|
 | 1. Motion | A/B transition mode with drawn curves; sequence ramps; oscillator extras (Frame/Free sync, sine/cosine slave, ramp envelope) |
-| 2. Output | Configurable canvas resolution; real-time video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries |
+| 2. Output | Configurable canvas resolution; video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries, in real-time or frame-accurate offline mode |
 | 3. Look | True raster (scanline) mode; colorizer thresholds; edge fringing; rotation axis wander; level keying over a background image |
 
 **Out of scope** (recorded in "Later"): raster sections, sequential intensity, blanking wipes, the node graph and modulation matrix, MIDI/OSC, audio-driven "mouth control", alpha-channel export, video backgrounds, overlapping sequence ramps.
@@ -156,6 +156,14 @@ These findings from the manuals shape the design. Page references are in the res
   - A frame is captured only when `floor(time · 60)` advances, and its pts is that frame number. Pausing stops the clock, so it also stops new frames.
   - This gives clean 60 fps output whatever the display refresh rate, as long as the display runs at 60 Hz or faster.
   - If rendering runs below 60 fps, frames are missing and the pts gaps make the encoder hold the previous frame. The panel warns about this.
+- **Offline (frame-accurate) mode:** a capture-mode choice of **Real-time** (default, as above) or **Offline**.
+  - While recording in Offline mode, animation time advances by exactly 1/60 s per rendered frame, ignoring wall-clock time.
+  - Every rendered frame is captured, with pts = frame index.
+  - Sending a frame to the encoder **blocks when the channel is full**, so no frame is ever dropped. Rendering, and the on-screen preview, slow down to the encoder's pace.
+  - Transitions, sequences, oscillator phases and drift all run on that same clock, so the file is exactly what real-time playback would look like at a perfect 60 fps.
+  - An optional **Stop after N seconds** field (0 = manual stop) applies to both modes and is mainly useful for offline renders.
+  - The panel shows "offline: N× realtime".
+  - When the recording stops, the clock returns to wall-clock time from the current animation time, so there's no jump.
 - **Encoder thread:** owns the swscale context, encoder and muxer.
   - Frame buffers are owned `Vec<u8>`s sent over the bounded channel and returned for reuse on a second channel.
   - It converts RGBA → `yuv444p` (HEVC, swscale with BT.709) or → `bgra` (FFV1, byte swizzle), then encodes and muxes.
@@ -191,7 +199,7 @@ A feasibility spike verified everything in this section on the dev machine (2026
   - HEVC NVENC yuv444p: about 215 fps. swscale is the main cost, at about 345 fps single-threaded.
   - FFV1: about 38–45 fps.
   - **FFV1 therefore cannot hold 60 fps at 1080p on grainy content.** It will drop frames, which the panel counts. The format menu labels it "lossless, may drop frames above 720p".
-  - A frame-accurate offline render mode that removes this limit is listed under Later.
+  - **Offline mode** (see Capture) removes this limit: FFV1 and 4K renders never drop frames.
 - **NVENC availability:** `find_by_name("hevc_nvenc")` succeeds even without NVIDIA hardware, but `open` fails. This is handled as a capture-start error suggesting FFV1. It also fails if the consumer-GPU session cap is reached.
 - **Licensing:** the "full_build" FFmpeg is GPL. Fine for personal use; check the license before distributing binaries.
 
@@ -201,7 +209,12 @@ A feasibility spike verified everything in this section on the dev machine (2026
 
 ### True raster mode
 
-- **Params:** `raster.enabled` (default off), `lines` (100–1200, default 600), `beam_width` (0.5–4.0 canvas pixels, default 1.2), `compensation` (0–1, default 1).
+- **Params:**
+  - `raster.enabled` (default off);
+  - `lines` (100–1200, default 600);
+  - `beam_width` (0.5–4.0 canvas pixels, default 1.2);
+  - `compensation` (0–1, default 1);
+  - `speed_compensation` (0–1, default 0.3).
 - When enabled, a **raster pass** replaces the warp pass and writes the same grayscale target, so colorize and everything after it is unchanged.
 - **Geometry:** `lines` instances. Each is a triangle strip of `segments = clamp(canvas_width / 2, 256, 2048)` quads along the line.
 - **Vertex shader:**
@@ -210,7 +223,10 @@ A feasibility spike verified everything in this section on the dev machine (2026
   - The global transform is applied in the forward direction.
   - The vertex is then offset by ±half the beam width along the line's normal, estimated from neighbouring samples.
 - **Fragment shader:** brightness = source luminance at (u, v) × a Gaussian beam profile across the line × compensation gain. **Additive blending** into a cleared target, so packed lines overlap and brighten.
-- **Compensation gain:** `mix(1, spacing_ratio, compensation)`, where `spacing_ratio` is the local line spacing divided by the rest spacing, found by finite difference of the vertical deflection with respect to v.
+- **Compensation gain:**
+  - **Area term:** `mix(1, spacing_ratio, compensation)`, where `spacing_ratio` is the local line spacing divided by the rest spacing, found by finite difference of the vertical deflection with respect to v.
+  - **Speed term:** `1 + speed_compensation · min(speed / 0.5, 4)`. `speed` is how fast the vertex is moving, in frame heights per second, found by evaluating the deflected position at `time` and `time − 1/60`.
+  - The two terms are multiplied. This follows the manual's compensator, which boosted brightness with both raster area and animation speed (|d/dt|), so fast sweeps don't fade.
 - **Warp vs raster:** warp is an inverse map and raster is a forward map, so the same oscillator settings give equivalent but mirrored ripples. This is documented in the UI tooltip.
 - The composite's painted-on scanline overlay is forced to strength 0 while raster mode is on, because the lines are real.
 
@@ -259,7 +275,7 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 - `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous.
 - `sequence.rs`: cues start at their frames; snap-on-overlap; Reset; Loop; Stop freezes.
 - `capture`:
-  - Pure pieces: file naming; frame decimation from time (60 fps at a 144 Hz display); row-padding removal; ring-slot rotation; drop counting when the channel is full.
+  - Pure pieces: file naming; frame decimation from time (60 fps at a 144 Hz display); row-padding removal; ring-slot rotation; drop counting when the channel is full; the offline clock (exactly 1/60 s per frame, every frame captured, return to wall-clock without a jump); Stop after N seconds.
   - Integration test: encode 30 frames with FFV1 into a temp directory, reopen with the FFmpeg library, and check the frame count, size and lossless pixel equality of one frame.
   - The same test with HEVC NVENC, skipped with a message when NVENC is unavailable.
 - **GPU readback tests** (extending `tests/smoke.rs`):
@@ -272,4 +288,4 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 
 ## Later (documented, not built now)
 
-Raster sections (up to 5 bands with independent deflection and intensity); the sequential intensity generator; blanking-comparator wipes; modulation matrix / node graph (multipliers, rectifiers, summers, programmed phase lock); MIDI/OSC; audio-driven amplitude ("mouth control"); alpha export (FFV1 with alpha); frame-accurate offline render mode (fixed timestep; rendering waits for the encoder, so FFV1 and 4K never drop frames); video backgrounds and live camera; overlapping sequence ramps; persisting curves, cues and presets to disk.
+Raster sections (up to 5 bands with independent deflection and intensity); the sequential intensity generator; blanking-comparator wipes; modulation matrix / node graph (multipliers, rectifiers, summers, programmed phase lock); MIDI/OSC; audio-driven amplitude ("mouth control"); alpha export (FFV1 with alpha); video backgrounds and live camera; overlapping sequence ramps; persisting curves, cues and presets to disk.
