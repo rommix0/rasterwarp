@@ -2,4 +2,5 @@
 
 pub mod gpu;
 pub mod params;
+pub mod passes;
 pub mod source;
