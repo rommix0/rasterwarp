@@ -21,6 +21,30 @@ impl Mode {
     pub const ALL: [Mode; 3] = [Mode::Live, Mode::Transition, Mode::Sequence];
 }
 
+/// What the off-air preview is showing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewSource {
+    /// An A/B bank (an index into `AbState::banks`).
+    Bank(usize),
+    /// A sequence cue (an index into the cue list).
+    Cue(usize),
+}
+
+impl PreviewSource {
+    pub fn label(self) -> String {
+        match self {
+            PreviewSource::Bank(i) => format!("Off-air: {}", AbState::bank_name(i)),
+            PreviewSource::Cue(i) => format!("Cue {}", i + 1),
+        }
+    }
+}
+
+/// The off-air preview for this frame.
+pub struct Preview {
+    pub source: PreviewSource,
+    pub frame: FrameParams,
+}
+
 pub struct Motion {
     mode: Mode,
     pub ab: AbState,
@@ -30,6 +54,10 @@ pub struct Motion {
     rest: Clocks,
     /// Phases of a running ramp's destination.
     target: Clocks,
+    /// Phases of the off-air preview, independent of the output.
+    preview: Clocks,
+    /// The preview source the `preview` clocks belong to.
+    preview_shown: Option<PreviewSource>,
 }
 
 impl Motion {
@@ -41,6 +69,8 @@ impl Motion {
             curves: CurveLibrary::default(),
             rest: Clocks::default(),
             target: Clocks::default(),
+            preview: Clocks::default(),
+            preview_shown: None,
         }
     }
 
@@ -144,6 +174,44 @@ impl Motion {
                 }
             }
         }
+        // A new preview source starts from the output's phases, then runs on its own.
+        let preview = self.preview_params().map(|(source, p)| (source, *p));
+        let source = preview.map(|(source, _)| source);
+        if source != self.preview_shown {
+            self.preview = self.rest;
+            self.preview_shown = source;
+        }
+        if let Some((_, p)) = preview {
+            self.preview.advance(&p, dt);
+        }
+    }
+
+    /// What the off-air preview shows, if anything: the off-air bank in Transition mode,
+    /// and the selected cue while a sequence runs.
+    pub fn preview(&self) -> Option<Preview> {
+        let (source, p) = self.preview_params()?;
+        Some(Preview {
+            source,
+            frame: blend(p, p, 0.0, None, &self.preview, &self.preview),
+        })
+    }
+
+    fn preview_params(&self) -> Option<(PreviewSource, &Params)> {
+        match self.mode {
+            Mode::Live => None,
+            Mode::Transition => {
+                let off = self.ab.off_air();
+                Some((PreviewSource::Bank(off), &self.ab.banks[off]))
+            }
+            Mode::Sequence => {
+                let seq = self.sequence.as_ref()?;
+                if !seq.is_running() {
+                    return None; // the output already shows the selected cue
+                }
+                let i = seq.selected;
+                Some((PreviewSource::Cue(i), &seq.cues()[i].params))
+            }
+        }
     }
 
     /// What the renderer draws this frame.
@@ -186,6 +254,71 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_mode_has_no_preview() {
+        let m = Motion::new(Params::default());
+        assert!(m.preview().is_none());
+    }
+
+    #[test]
+    fn transition_preview_shows_the_off_air_bank() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Transition);
+        m.editable().warp.zoom = 3.0;
+        let preview = m.preview().expect("preview in Transition mode");
+        assert_eq!(preview.source, PreviewSource::Bank(1));
+        assert_eq!(preview.source.label(), "Off-air: B");
+        assert_eq!(preview.frame.warp.zoom, 3.0);
+        assert_eq!(m.frame().warp.zoom, 1.0, "the output is unchanged");
+    }
+
+    #[test]
+    fn preview_shows_the_destination_then_the_new_off_air_bank() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Transition);
+        m.editable().warp.zoom = 3.0;
+        m.trigger();
+        m.advance(1.0);
+        assert_eq!(m.preview().unwrap().source, PreviewSource::Bank(1));
+        m.advance(1.5); // the ramp finishes and B goes on air
+        let preview = m.preview().unwrap();
+        assert_eq!(preview.source, PreviewSource::Bank(0));
+        assert_eq!(preview.frame.warp.zoom, 1.0);
+    }
+
+    #[test]
+    fn sequence_preview_shows_the_selected_cue_only_while_running() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Sequence);
+        let seq = m.sequence_mut();
+        seq.add_cue();
+        seq.selected_cue_mut().params.warp.zoom = 2.0;
+        assert!(m.preview().is_none(), "stopped: the output shows the cue");
+        m.sequence_mut().run();
+        let preview = m.preview().expect("preview while running");
+        assert_eq!(preview.source, PreviewSource::Cue(1));
+        assert_eq!(preview.source.label(), "Cue 2");
+        assert_eq!(preview.frame.warp.zoom, 2.0);
+    }
+
+    #[test]
+    fn preview_starts_from_the_output_phases_then_runs_on_its_own() {
+        let mut m = Motion::new(Params::default());
+        m.editable().warp.oscillators[0].phase_speed = 0.4;
+        m.advance(0.7);
+        m.set_mode(Mode::Transition);
+        m.advance(0.0); // the preview appears
+        let phase = |f: &FrameParams| f.warp.oscillators[0].phase;
+        assert_eq!(phase(&m.preview().unwrap().frame), phase(&m.frame()));
+        m.editable().warp.oscillators[0].phase_speed = 0.0;
+        m.advance(0.5);
+        let still = phase(&m.preview().unwrap().frame);
+        let moved = phase(&m.frame());
+        // The output moved 0.4 × 0.5 = 0.2 cycles while the preview held still.
+        let off = moved - still - 0.2;
+        assert!((off - off.round()).abs() < 1e-4, "{moved} vs {still}");
+    }
 
     #[test]
     fn live_mode_edits_what_is_shown() {
