@@ -88,7 +88,7 @@ struct State {
     egui_renderer: egui_wgpu::Renderer,
     params: Params,
     ui: UiState,
-    time: f32,
+    time: f64,
     last_frame: Instant,
 }
 
@@ -117,8 +117,10 @@ impl State {
         // through an sRGB view of it so its linear output is encoded correctly.
         let format = caps.formats[0].remove_srgb_suffix();
         let srgb_format = format.add_srgb_suffix();
-        // Mailbox shows the true frame rate without tearing; Fifo (vsync) is always available.
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+        // Fifo (vsync) keeps the per-frame feedback semantics at 60 fps. RASTERWARP_UNCAPPED=1
+        // opts into Mailbox (uncapped, no tearing) to measure the real render cost.
+        let uncapped = std::env::var("RASTERWARP_UNCAPPED").is_ok_and(|v| v == "1");
+        let present_mode = if uncapped && caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
         } else {
             wgpu::PresentMode::Fifo
@@ -213,7 +215,8 @@ impl State {
         self.last_frame = now;
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
         if !self.ui.paused {
-            self.time += dt;
+            // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
+            self.time += f64::from(dt.min(0.1));
         }
 
         if self.config.width == 0 || self.config.height == 0 {
@@ -271,7 +274,7 @@ impl State {
             &self.queue,
             &mut encoder,
             &self.params,
-            self.time,
+            self.time as f32,
             &srgb_view,
             output_size,
         );
