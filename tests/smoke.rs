@@ -1,6 +1,7 @@
 //! Headless GPU smoke test: builds every pass on a real device, renders a few frames
 //! offscreen, and reads the result back. wgpu validation errors panic, failing the test.
 
+use rasterwarp::blend::FrameParams;
 use rasterwarp::gpu;
 use rasterwarp::params::Params;
 use rasterwarp::passes::Renderer;
@@ -23,7 +24,7 @@ fn renders_frames_offscreen() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
     let mut renderer = Renderer::new(&device, &queue, format, (640, 360), &test_card(400, 300));
-    let params = Params::default();
+    let frame_params = FrameParams::at_rest(&Params::default());
 
     for frame in 0..3 {
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -31,7 +32,7 @@ fn renders_frames_offscreen() {
             &device,
             &queue,
             &mut encoder,
-            &params,
+            &frame_params,
             frame as f32 * 0.1,
             &output.view,
             (OUT_W, OUT_H),

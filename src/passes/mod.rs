@@ -6,7 +6,7 @@ pub mod composite;
 pub mod feedback;
 pub mod warp;
 
-use crate::params::Params;
+use crate::blend::FrameParams;
 use crate::source::{self, GrayImage};
 
 pub struct Renderer {
@@ -60,7 +60,7 @@ impl Renderer {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        params: &Params,
+        frame: &FrameParams,
         time: f32,
         output: &wgpu::TextureView,
         output_size: (u32, u32),
@@ -71,28 +71,28 @@ impl Renderer {
             queue,
             encoder,
             &self.source,
-            &warp::uniforms(&params.warp, time, aspect, self.source_aspect),
+            &warp::uniforms(&frame.warp, time, aspect, self.source_aspect),
         );
         self.colorize.render(
             device,
             queue,
             encoder,
             &self.warp.target.view,
-            &colorize::uniforms(&params.colorize, time),
+            &colorize::uniforms(&frame.colorize),
         );
         self.feedback.render(
             device,
             queue,
             encoder,
             &self.colorize.target.view,
-            &feedback::uniforms(&params.feedback, aspect),
+            &feedback::uniforms(&frame.feedback, aspect),
         );
         self.bloom.render(
             device,
             queue,
             encoder,
             self.feedback.output(),
-            params.glow.bloom_threshold,
+            frame.glow.bloom_threshold,
         );
         self.composite.render(
             device,
@@ -102,7 +102,7 @@ impl Renderer {
             self.bloom.output(),
             output,
             &composite::uniforms(
-                &params.glow,
+                &frame.glow,
                 time,
                 self.size,
                 output_size,

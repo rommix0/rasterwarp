@@ -12,6 +12,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::window::{Window, WindowId};
 
+use crate::blend::{Clocks, blend};
 use crate::gpu;
 use crate::params::Params;
 use crate::passes::Renderer;
@@ -88,6 +89,8 @@ struct State {
     egui_state: egui_winit::State,
     egui_renderer: egui_wgpu::Renderer,
     params: Params,
+    /// Running oscillator, LFO and palette phases.
+    clocks: Clocks,
     ui: UiState,
     time: f64,
     last_frame: Instant,
@@ -197,6 +200,7 @@ impl State {
             egui_state,
             egui_renderer,
             params: Params::default(),
+            clocks: Clocks::default(),
             ui,
             time: 0.0,
             last_frame: Instant::now(),
@@ -232,7 +236,9 @@ impl State {
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
         if !self.ui.paused {
             // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
-            self.time += f64::from(dt.min(0.1));
+            let step = dt.min(0.1);
+            self.time += f64::from(step);
+            self.clocks.advance(&self.params, step);
         }
 
         if self.config.width == 0 || self.config.height == 0 {
@@ -281,6 +287,14 @@ impl State {
             }
         }
 
+        let frame_params = blend(
+            &self.params,
+            &self.params,
+            0.0,
+            None,
+            &self.clocks,
+            &self.clocks,
+        );
         let mut encoder = self.device.create_command_encoder(&Default::default());
         if actions.clear_feedback {
             self.renderer.clear_feedback(&mut encoder);
@@ -289,7 +303,7 @@ impl State {
             &self.device,
             &self.queue,
             &mut encoder,
-            &self.params,
+            &frame_params,
             self.time as f32,
             &srgb_view,
             output_size,

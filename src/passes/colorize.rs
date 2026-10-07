@@ -2,8 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::blend::ColorizeFrame;
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
-use crate::params::{ColorizeParams, PALETTE_SIZE, srgb_to_linear};
+use crate::params::PALETTE_SIZE;
 
 /// Matches `struct Colorize` in colorize.wgsl.
 #[repr(C)]
@@ -13,15 +14,15 @@ pub struct ColorizeUniforms {
     pub palette: [[f32; 4]; PALETTE_SIZE],
 }
 
-pub fn uniforms(p: &ColorizeParams, time: f32) -> ColorizeUniforms {
-    let levels = p.levels as f32;
-    // Wrap on the CPU so the shader never sees a huge, imprecise offset.
-    let cycle = (time * p.cycle_speed).rem_euclid(levels);
+pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
     ColorizeUniforms {
-        settings: [levels, p.softness, cycle, if p.bypass { 1.0 } else { 0.0 }],
-        palette: p
-            .palette
-            .map(|[r, g, b]| [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), 1.0]),
+        settings: [
+            c.levels as f32,
+            c.softness,
+            c.cycle,
+            if c.bypass { 1.0 } else { 0.0 },
+        ],
+        palette: c.palette_linear.map(|[r, g, b]| [r, g, b, 1.0]),
     }
 }
 
@@ -72,6 +73,7 @@ impl ColorizePass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blend::FrameParams;
     use crate::params::Params;
 
     #[test]
@@ -90,20 +92,13 @@ mod tests {
     }
 
     #[test]
-    fn palette_is_converted_to_linear() {
-        let mut p = Params::default().colorize;
-        p.palette[1] = [0.5, 1.0, 0.0];
-        let u = uniforms(&p, 0.0);
-        assert!((u.palette[1][0] - 0.214).abs() < 1e-3);
-        assert_eq!(&u.palette[1][1..], &[1.0, 0.0, 1.0]);
-    }
-
-    #[test]
-    fn cycle_offset_wraps_within_levels() {
-        let mut p = Params::default().colorize;
-        p.levels = 4;
-        p.cycle_speed = -1.0;
-        let u = uniforms(&p, 5.5);
-        assert!((u.settings[2] - 2.5).abs() < 1e-6);
+    fn packs_frame_values() {
+        let mut frame = FrameParams::at_rest(&Params::default()).colorize;
+        frame.cycle = 2.5;
+        frame.bypass = true;
+        frame.palette_linear[1] = [0.25, 0.5, 0.75];
+        let u = uniforms(&frame);
+        assert_eq!(u.settings, [6.0, frame.softness, 2.5, 1.0]);
+        assert_eq!(u.palette[1], [0.25, 0.5, 0.75, 1.0]);
     }
 }

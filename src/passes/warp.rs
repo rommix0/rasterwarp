@@ -2,8 +2,9 @@
 
 use bytemuck::{Pod, Zeroable};
 
+use crate::blend::{MAX_SLOTS, OscSlot, WarpFrame};
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
-use crate::params::{Axis, OSCILLATOR_COUNT, OscInput, WarpParams, Waveform};
+use crate::params::{Axis, OscInput, Waveform};
 
 /// Matches `struct Osc` in warp.wgsl.
 #[repr(C)]
@@ -21,7 +22,7 @@ pub struct WarpUniforms {
     pub frame: [f32; 4],
     pub transform: [f32; 4],
     pub source_size: [f32; 4],
-    pub osc: [OscUniform; OSCILLATOR_COUNT],
+    pub osc: [OscUniform; MAX_SLOTS],
 }
 
 /// Size of the source inside the frame (frame height = 1), fitted so the whole
@@ -34,36 +35,45 @@ pub fn source_fit(frame_aspect: f32, source_aspect: f32) -> [f32; 2] {
     }
 }
 
-pub fn uniforms(p: &WarpParams, time: f32, frame_aspect: f32, source_aspect: f32) -> WarpUniforms {
+pub fn uniforms(w: &WarpFrame, time: f32, frame_aspect: f32, source_aspect: f32) -> WarpUniforms {
     let fit = source_fit(frame_aspect, source_aspect);
+    let count = w.oscillators.len().min(MAX_SLOTS);
+    let mut osc = [OscUniform::zeroed(); MAX_SLOTS];
+    for (dst, slot) in osc.iter_mut().zip(&w.oscillators) {
+        *dst = osc_uniform(slot);
+    }
     WarpUniforms {
-        frame: [time, frame_aspect, p.drift, 0.0],
-        transform: [p.zoom, p.rotation, p.offset[0], p.offset[1]],
+        frame: [time, frame_aspect, w.drift, count as f32],
+        transform: [w.zoom, w.rotation, w.offset[0], w.offset[1]],
         source_size: [fit[0], fit[1], 0.0, 0.0],
-        osc: p.oscillators.map(|o| OscUniform {
-            mode: [
-                match o.waveform {
-                    Waveform::Sine => 0,
-                    Waveform::Triangle => 1,
-                    Waveform::Ramp => 2,
-                    Waveform::Square => 3,
-                    Waveform::Noise => 4,
-                },
-                match o.target {
-                    Axis::X => 0,
-                    Axis::Y => 1,
-                },
-                match o.input {
-                    OscInput::U => 0,
-                    OscInput::V => 1,
-                    OscInput::Radius => 2,
-                    OscInput::Time => 3,
-                },
-                0,
-            ],
-            wave: [o.frequency, o.amplitude, o.phase, o.phase_speed],
-            lfo: [o.lfo_rate, o.lfo_depth, 0.0, 0.0],
-        }),
+        osc,
+    }
+}
+
+fn osc_uniform(o: &OscSlot) -> OscUniform {
+    OscUniform {
+        mode: [
+            match o.waveform {
+                Waveform::Sine => 0,
+                Waveform::Triangle => 1,
+                Waveform::Ramp => 2,
+                Waveform::Square => 3,
+                Waveform::Noise => 4,
+            },
+            match o.target {
+                Axis::X => 0,
+                Axis::Y => 1,
+            },
+            match o.input {
+                OscInput::U => 0,
+                OscInput::V => 1,
+                OscInput::Radius => 2,
+                OscInput::Time => 3,
+            },
+            o.index as u32,
+        ],
+        wave: [o.frequency, o.amplitude, o.phase, 0.0],
+        lfo: [o.lfo_phase, o.lfo_depth, 0.0, 0.0],
     }
 }
 
@@ -114,6 +124,7 @@ impl WarpPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blend::FrameParams;
     use crate::params::Params;
 
     #[test]
@@ -127,9 +138,9 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // Osc = 3 x vec4 = 48 bytes; Warp = 3 x vec4 + 4 x Osc = 240 bytes.
+        // Osc = 3 x vec4 = 48 bytes; Warp = 3 x vec4 + 8 x Osc = 432 bytes.
         assert_eq!(size_of::<OscUniform>(), 48);
-        assert_eq!(size_of::<WarpUniforms>(), 240);
+        assert_eq!(size_of::<WarpUniforms>(), 432);
     }
 
     #[test]
@@ -143,12 +154,15 @@ mod tests {
     }
 
     #[test]
-    fn packs_oscillator_modes() {
-        let p = Params::default().warp;
-        let u = uniforms(&p, 2.0, 16.0 / 9.0, 1.0);
+    fn packs_oscillator_slots() {
+        let p = Params::default();
+        let frame = FrameParams::at_rest(&p);
+        let u = uniforms(&frame.warp, 2.0, 16.0 / 9.0, 1.0);
         assert_eq!(u.frame[0], 2.0);
-        // Default oscillator 1: triangle, Y target, U input.
-        assert_eq!(u.osc[1].mode, [1, 1, 0, 0]);
-        assert_eq!(u.osc[0].wave[1], p.oscillators[0].amplitude);
+        assert_eq!(u.frame[3], 4.0, "slot count");
+        // Default oscillator 2: triangle, Y target, U input, oscillator index 1.
+        assert_eq!(u.osc[1].mode, [1, 1, 0, 1]);
+        assert_eq!(u.osc[0].wave[1], p.warp.oscillators[0].amplitude);
+        assert_eq!(u.osc[4].wave, [0.0; 4], "unused slots are zero");
     }
 }
