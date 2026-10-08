@@ -88,8 +88,8 @@ impl Recorder {
         self.mode
     }
 
-    /// Call once per frame before rendering: hands frames that have come back from the
-    /// GPU to the encoder. An error means the encoder has stopped.
+    /// Call once per screen refresh, before drawing its canvas frames: hands frames that
+    /// have come back from the GPU to the encoder. An error means the encoder has stopped.
     pub fn pump(&mut self, device: &wgpu::Device) -> Result<()> {
         self.deliver(device, false, self.mode == CaptureMode::Offline)
     }
@@ -173,12 +173,56 @@ impl Recorder {
     fn send(&mut self, frame: Frame, block: bool) -> Result<()> {
         if block {
             self.encoder.send(frame)?;
-        } else if let Some(frame) = self.encoder.try_send(frame)? {
-            self.dropped += 1;
-            self.spare.push(frame.rgba);
-            return Ok(());
+            self.frames += 1;
+        } else {
+            let rejected = self.encoder.try_send(frame)?;
+            count_offer(
+                rejected,
+                &mut self.frames,
+                &mut self.dropped,
+                &mut self.spare,
+            );
         }
-        self.frames += 1;
         Ok(())
+    }
+}
+
+/// Counts a frame offered to the encoder without waiting. `rejected` is the frame a full
+/// queue handed back: it counts as dropped, and its buffer is kept in `spare` for reuse.
+fn count_offer(
+    rejected: Option<Frame>,
+    frames: &mut u64,
+    dropped: &mut u64,
+    spare: &mut Vec<Vec<u8>>,
+) {
+    match rejected {
+        Some(frame) => {
+            *dropped += 1;
+            spare.push(frame.rgba);
+        }
+        None => *frames += 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::encode::try_queue;
+    use super::*;
+
+    #[test]
+    fn a_full_encoder_queue_drops_frames_and_keeps_their_buffers() {
+        // The encoder never takes a frame, so the queue fills after one.
+        let (queue, _encoder) = std::sync::mpsc::sync_channel(1);
+        let (mut frames, mut dropped, mut spare) = (0, 0, Vec::new());
+        for pts in 0..3 {
+            let frame = Frame {
+                pts,
+                rgba: vec![pts as u8; 4],
+            };
+            let rejected = try_queue(&queue, frame).unwrap();
+            count_offer(rejected, &mut frames, &mut dropped, &mut spare);
+        }
+        assert_eq!((frames, dropped), (1, 2));
+        assert_eq!(spare, [vec![1; 4], vec![2; 4]]);
     }
 }

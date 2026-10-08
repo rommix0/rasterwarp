@@ -153,9 +153,10 @@ pub struct ColorizeParams {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FeedbackParams {
-    /// How much of the previous frame survives each frame. 0 = no trails.
+    /// How much of the previous canvas frame survives each canvas frame (so trails
+    /// decay at the program frame rate). 0 = no trails.
     pub amount: f32,
-    /// Per-frame transform applied to the previous frame.
+    /// Per-canvas-frame transform applied to the previous canvas frame.
     pub zoom: f32,
     pub rotation: f32,
     pub offset: [f32; 2],

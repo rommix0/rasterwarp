@@ -93,11 +93,7 @@ impl Encoder {
     /// Queues a frame without waiting. Returns the frame back if the queue is full.
     /// An error means the encoder has stopped; [`Encoder::finish`] reports why.
     pub fn try_send(&self, frame: Frame) -> Result<Option<Frame>> {
-        match self.sender()?.try_send(frame) {
-            Ok(()) => Ok(None),
-            Err(TrySendError::Full(frame)) => Ok(Some(frame)),
-            Err(TrySendError::Disconnected(_)) => Err(anyhow!("the encoder stopped")),
-        }
+        try_queue(self.sender()?, frame)
     }
 
     /// Queues a frame, waiting for room. An error means the encoder has stopped.
@@ -127,6 +123,16 @@ impl Encoder {
         self.frames
             .as_ref()
             .ok_or_else(|| anyhow!("the encoder already finished"))
+    }
+}
+
+/// Queues `frame` on an encoder's `queue` without waiting. Returns the frame back if the
+/// queue is full; an error means the encoder thread has stopped.
+pub(super) fn try_queue(queue: &SyncSender<Frame>, frame: Frame) -> Result<Option<Frame>> {
+    match queue.try_send(frame) {
+        Ok(()) => Ok(None),
+        Err(TrySendError::Full(frame)) => Ok(Some(frame)),
+        Err(TrySendError::Disconnected(_)) => Err(anyhow!("the encoder stopped")),
     }
 }
 
