@@ -1,10 +1,12 @@
-// Colorizing: posterize brightness into levels at adjustable thresholds, map each level
-// to a palette color.
+// Colorizing: smear edges in the scan direction, posterize brightness into levels at
+// adjustable thresholds, and map each level to a palette color.
 
 struct Colorize {
     settings: vec4<f32>, // levels, softness, cycle offset (levels), bypass (0 or 1)
     palette: array<vec4<f32>, 8>, // linear RGB
     thresholds: array<vec4<f32>, 2>, // 7 thresholds; only the first levels - 1 are used
+    fringe: array<vec4<f32>, 12>, // 48 smear weights: [k] applies to the pixel k to the left
+    extra: vec4<f32>, // smear taps in use, unused, unused, unused
 };
 
 @group(0) @binding(0) var<uniform> u: Colorize;
@@ -35,9 +37,21 @@ fn level_of(g: f32, levels: u32, width: f32) -> f32 {
     return x;
 }
 
+// Brightness after the scan-direction smear: a weighted sum of this pixel and the
+// pixels to its left, as a band-limited signal scanned left to right smears after edges.
+fn smeared(pos: vec2<i32>) -> f32 {
+    let taps = i32(u.extra.x);
+    var g = 0.0;
+    for (var k = 0; k < taps; k++) {
+        let x = max(pos.x - k, 0);
+        g += u.fringe[k / 4][k % 4] * textureLoad(source, vec2<i32>(x, pos.y), 0).r;
+    }
+    return g;
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let g = textureSampleLevel(source, samp, in.uv, 0.0).r;
+    let g = smeared(vec2<i32>(in.pos.xy));
     if u.settings.w > 0.5 {
         let l = pow(g, 2.2);
         return vec4<f32>(l, l, l, 1.0);

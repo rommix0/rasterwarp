@@ -555,6 +555,8 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
                 }
             }
             ui.add(Slider::new(&mut c.softness, ranges::SOFTNESS).text("softness"));
+            ui.add(Slider::new(&mut c.bandwidth, ranges::BANDWIDTH).text("edge fringe (px)"));
+            ui.add(Slider::new(&mut c.ringing, ranges::RINGING).text("ringing"));
             ui.add(Slider::new(&mut c.cycle_speed, ranges::CYCLE_SPEED).text("cycle speed"));
             ui.horizontal_wrapped(|ui| {
                 for color in &mut c.palette {

@@ -413,6 +413,53 @@ fn colorizer_levels_start_at_their_thresholds() {
     }
 }
 
+#[test]
+fn edges_smear_only_to_their_right() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (256, 64);
+    // Black on the left half, white on the right.
+    let image = GrayImage {
+        width: size.0,
+        height: size.1,
+        pixels: (0..size.0 * size.1)
+            .map(|i| if i % size.0 < size.0 / 2 { 0 } else { 255 })
+            .collect(),
+    };
+    let mut params = flat_params();
+    params.colorize.bypass = true; // show the smeared brightness itself
+    let row = |pixels: &[u8]| -> Vec<u8> {
+        let y = size.1 / 2;
+        (0..size.0)
+            .map(|x| pixels[((y * size.0 + x) * 4) as usize])
+            .collect()
+    };
+    let intermediate = |r: &[u8]| -> Vec<u32> {
+        (0..size.0)
+            .filter(|&x| (1..255).contains(&r[x as usize]))
+            .collect()
+    };
+    let edge = size.0 / 2;
+    let sharp = row(&render_still(&device, &queue, &params, &image, size));
+    assert!(intermediate(&sharp).is_empty(), "no smear at bandwidth 0");
+    params.colorize.bandwidth = 3.0;
+    let smeared = row(&render_still(&device, &queue, &params, &image, size));
+    assert!(
+        smeared[..edge as usize].iter().all(|&v| v == 0),
+        "the left side is unchanged"
+    );
+    let fringe = intermediate(&smeared);
+    assert!(
+        fringe.len() >= 3,
+        "the edge smears over a few pixels: {fringe:?}"
+    );
+    assert!(
+        fringe.iter().all(|&x| x >= edge),
+        "smear only to the right: {fringe:?}"
+    );
+}
+
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
 /// that buffer copies require.
 fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {

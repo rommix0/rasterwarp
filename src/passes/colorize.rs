@@ -3,6 +3,7 @@
 use bytemuck::{Pod, Zeroable};
 
 use crate::blend::ColorizeFrame;
+use crate::fringe;
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
 use crate::params::{PALETTE_SIZE, THRESHOLD_COUNT};
 
@@ -13,9 +14,12 @@ pub struct ColorizeUniforms {
     pub settings: [f32; 4],
     pub palette: [[f32; 4]; PALETTE_SIZE],
     pub thresholds: [[f32; 4]; 2],
+    pub fringe: [[f32; 4]; fringe::TAPS / 4],
+    pub extra: [f32; 4],
 }
 
 pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
+    let (weights, taps) = fringe::kernel(c.bandwidth, c.ringing);
     ColorizeUniforms {
         settings: [
             c.levels as f32,
@@ -27,6 +31,8 @@ pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
         thresholds: std::array::from_fn(|row| {
             std::array::from_fn(|col| c.thresholds.get(row * 4 + col).copied().unwrap_or(1.0))
         }),
+        fringe: std::array::from_fn(|row| std::array::from_fn(|col| weights[row * 4 + col])),
+        extra: [taps as f32, 0.0, 0.0, 0.0],
     }
 }
 
@@ -93,8 +99,9 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // vec4 settings + array<vec4, 8> palette + array<vec4, 2> thresholds.
-        assert_eq!(size_of::<ColorizeUniforms>(), 176);
+        // vec4 settings, array<vec4, 8> palette, array<vec4, 2> thresholds,
+        // array<vec4, 12> smear weights, vec4 extra.
+        assert_eq!(size_of::<ColorizeUniforms>(), 384);
     }
 
     #[test]
@@ -108,5 +115,20 @@ mod tests {
         assert_eq!(u.settings, [6.0, frame.softness, 2.5, 1.0]);
         assert_eq!(u.palette[1], [0.25, 0.5, 0.75, 1.0]);
         assert_eq!(u.thresholds, [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 1.0]]);
+    }
+
+    #[test]
+    fn packs_the_smear_kernel() {
+        let mut frame = FrameParams::at_rest(&Params::default()).colorize;
+        frame.bandwidth = 0.0;
+        let u = uniforms(&frame);
+        assert_eq!(u.extra[0], 1.0, "one tap");
+        assert_eq!(u.fringe[0], [1.0, 0.0, 0.0, 0.0]);
+        frame.bandwidth = 3.0;
+        frame.ringing = 0.4;
+        let (weights, taps) = fringe::kernel(3.0, 0.4);
+        let u = uniforms(&frame);
+        assert_eq!(u.extra[0], taps as f32);
+        assert_eq!(u.fringe[2][1], weights[9]);
     }
 }
