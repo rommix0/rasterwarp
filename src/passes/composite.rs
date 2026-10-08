@@ -16,6 +16,58 @@ pub struct CompositeUniforms {
     pub background: [f32; 4],
 }
 
+/// The part of the output the canvas is fitted into, in pixels. The rest of the output
+/// stays black (in the window, the control panel covers it).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Area {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Area {
+    /// The whole output.
+    pub fn whole(size: (u32, u32)) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width: size.0,
+            height: size.1,
+        }
+    }
+
+    /// The pixels inside `[left, top, right, bottom]`, rounded, kept inside an output of
+    /// `size` pixels and at least one pixel each way.
+    pub fn within(size: (u32, u32), [left, top, right, bottom]: [f32; 4]) -> Self {
+        let edge = |v: f32, max: u32| (v.round().max(0.0) as u32).min(max);
+        let x = edge(left, size.0.saturating_sub(1));
+        let y = edge(top, size.1.saturating_sub(1));
+        let right = edge(right, size.0).max(x + 1);
+        let bottom = edge(bottom, size.1).max(y + 1);
+        Self {
+            x,
+            y,
+            width: right - x,
+            height: bottom - y,
+        }
+    }
+
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    /// `[x, y, width, height]`, as a render pass viewport.
+    pub fn viewport(&self) -> [f32; 4] {
+        [
+            self.x as f32,
+            self.y as f32,
+            self.width as f32,
+            self.height as f32,
+        ]
+    }
+}
+
 /// Fraction of the output covered by the internal image, keeping its aspect ratio.
 pub fn letterbox(output: (u32, u32), internal: (u32, u32)) -> [f32; 2] {
     let output_aspect = output.0 as f32 / output.1 as f32;
@@ -104,13 +156,15 @@ impl CompositePass {
         bloom: &wgpu::TextureView,
         background: &wgpu::TextureView,
         output: &wgpu::TextureView,
+        area: Area,
         uniforms: &CompositeUniforms,
     ) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(uniforms));
         let bind_group = self
             .pass
             .bind_group(device, &self.uniform, &[image, bloom, background]);
-        self.pass.draw(encoder, output, &bind_group, true);
+        self.pass
+            .draw_in(encoder, output, &bind_group, area.viewport());
     }
 }
 
@@ -168,5 +222,33 @@ mod tests {
         let p = crate::params::Params::default().glow;
         let u = uniforms(&p, 0.0, (1000, 500), (1000, 500), false, 1.0);
         assert_eq!(u.background, [1.0, 0.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn the_area_is_rounded_to_whole_pixels() {
+        // A 320-point panel at 150% scaling leaves the window right of pixel 480.
+        let area = Area::within((1920, 1080), [480.4, 0.0, 1920.0, 1080.0]);
+        assert_eq!(
+            area,
+            Area {
+                x: 480,
+                y: 0,
+                width: 1440,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            Area::whole((800, 600)),
+            Area::within((800, 600), [0.0, 0.0, 800.0, 600.0])
+        );
+    }
+
+    #[test]
+    fn the_area_stays_inside_the_window_and_is_never_empty() {
+        let area = Area::within((800, 600), [-10.0, -5.0, 900.0, 700.0]);
+        assert_eq!(area, Area::whole((800, 600)));
+        // A panel as wide as the window still leaves one pixel column.
+        let area = Area::within((800, 600), [800.0, 0.0, 800.0, 600.0]);
+        assert_eq!((area.x, area.width), (799, 1));
     }
 }

@@ -278,6 +278,29 @@ impl FullscreenPass {
         bind_group: &wgpu::BindGroup,
         clear: bool,
     ) {
+        self.draw_viewport(encoder, target, bind_group, clear, None);
+    }
+
+    /// Clears `target` to black, then draws only into the `[x, y, width, height]` pixel
+    /// rectangle `viewport`, as if that rectangle were the whole target.
+    pub fn draw_in(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bind_group: &wgpu::BindGroup,
+        viewport: [f32; 4],
+    ) {
+        self.draw_viewport(encoder, target, bind_group, true, Some(viewport));
+    }
+
+    fn draw_viewport(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        bind_group: &wgpu::BindGroup,
+        clear: bool,
+        viewport: Option<[f32; 4]>,
+    ) {
         let load = if clear {
             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
         } else {
@@ -299,6 +322,9 @@ impl FullscreenPass {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        if let Some([x, y, width, height]) = viewport {
+            pass.set_viewport(x, y, width, height, 0.0, 1.0);
+        }
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bind_group, &[]);
         pass.draw(0..3, 0..1);

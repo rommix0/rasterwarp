@@ -25,6 +25,7 @@ use crate::gpu;
 use crate::motion::{Mode, Motion};
 use crate::params::Params;
 use crate::passes::Renderer;
+use crate::passes::composite::Area;
 use crate::presets;
 use crate::preview::PreviewView;
 use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
@@ -969,7 +970,7 @@ impl State {
         self.ui.files.unsaved = self.unsaved(&self.project());
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
-        let egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
+        let mut egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
             actions = ui::draw(ui, &mut self.motion, &mut self.ui, overlay.as_ref())
         });
         self.egui_state
@@ -981,6 +982,16 @@ impl State {
             size_in_pixels: [output_size.0, output_size.1],
             pixels_per_point: egui_output.pixels_per_point,
         };
+        // The canvas goes beside the control panel, not under it.
+        let canvas_area = actions
+            .canvas_rect
+            .map_or(Area::whole(output_size), |rect| {
+                let scale = egui_output.pixels_per_point;
+                Area::within(
+                    output_size,
+                    [rect.min.x, rect.min.y, rect.max.x, rect.max.y].map(|v| v * scale),
+                )
+            });
         for (id, deltas) in &egui_output.textures_delta.set {
             for delta in deltas {
                 self.egui_renderer
@@ -1045,7 +1056,7 @@ impl State {
             &self.frame_params,
             self.time as f32,
             &srgb_view,
-            output_size,
+            canvas_area,
         );
         let egui_commands = self.egui_renderer.update_buffers(
             &self.device,
@@ -1082,6 +1093,8 @@ impl State {
         for id in &egui_output.textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
+        // All applied; egui checks this in debug builds.
+        egui_output.textures_delta.clear();
     }
 }
 

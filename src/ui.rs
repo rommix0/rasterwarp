@@ -23,6 +23,8 @@ use crate::transition::{AbState, DURATION};
 #[derive(Default)]
 pub struct UiState {
     pub paused: bool,
+    /// The control panel is hidden, so the canvas fills the window.
+    pub panel_hidden: bool,
     /// Show the off-air preview in Transition and Sequence modes.
     pub show_preview: bool,
     /// Smoothed time between screen refreshes in milliseconds.
@@ -83,7 +85,13 @@ pub struct UiActions {
     pub choose_background: bool,
     pub clear_background: bool,
     pub files: FileActions,
+    /// The part of the window left for the canvas, in points (beside the panel).
+    pub canvas_rect: Option<egui::Rect>,
 }
+
+/// Tab hides and shows the control panel; not while a text field has the keyboard.
+const TOGGLE_PANEL: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Tab);
 
 pub fn draw(
     ui: &mut Ui,
@@ -93,10 +101,16 @@ pub fn draw(
 ) -> UiActions {
     let mut actions = UiActions::default();
     files_ui::shortcuts(ui.ctx(), &mut actions.files);
+    if !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|i| i.consume_shortcut(&TOGGLE_PANEL))
+    {
+        state.panel_hidden = !state.panel_hidden;
+    }
+    let was_open = !state.panel_hidden;
+    let mut open = was_open;
     egui::Panel::left("controls")
         .resizable(true)
         .default_size(320.0)
-        .show(ui, |ui| {
+        .show_collapsible(ui, &mut open, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Rasterwarp");
                 ui.label(format!(
@@ -126,6 +140,13 @@ pub fn draw(
                         *motion.editable() = Params::default();
                         actions.clear_feedback = true;
                     }
+                    if ui
+                        .button("Hide panel")
+                        .on_hover_text("Show the whole canvas (Tab)")
+                        .clicked()
+                    {
+                        state.panel_hidden = true;
+                    }
                 });
                 let recording = state.capture.status.is_some();
                 files_ui::project_row(ui, &state.files, recording, &mut actions.files);
@@ -149,10 +170,33 @@ pub fn draw(
                 glow_section(ui, params);
             });
         });
+    // The panel's edge can also be dragged shut or open.
+    if open != was_open {
+        state.panel_hidden = !open;
+    }
+    actions.canvas_rect = Some(ui.available_rect_before_wrap());
+    if state.panel_hidden {
+        show_panel_button(ui.ctx(), state);
+    }
     if let Some(preview) = preview {
         preview_overlay(ui.ctx(), preview);
     }
     actions
+}
+
+/// While the panel is hidden, a button in the top-left corner brings it back.
+fn show_panel_button(ctx: &egui::Context, state: &mut UiState) {
+    egui::Area::new(egui::Id::new("show panel"))
+        .anchor(egui::Align2::LEFT_TOP, [8.0, 8.0])
+        .show(ctx, |ui| {
+            if ui
+                .button("Show panel")
+                .on_hover_text("Show the controls (Tab)")
+                .clicked()
+            {
+                state.panel_hidden = false;
+            }
+        });
 }
 
 /// The preview, framed and labelled, in the bottom-right corner of the window.

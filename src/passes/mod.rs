@@ -10,6 +10,7 @@ pub mod warp;
 
 use crate::blend::FrameParams;
 use crate::params::GlowParams;
+use crate::passes::composite::Area;
 use crate::source::{self, ColorImage, GrayImage};
 
 /// The format of the capture texture that recordings are read from.
@@ -124,7 +125,7 @@ impl Renderer {
     }
 
     /// Records one frame into `encoder`: draws a canvas frame, then composites it into
-    /// `output` (`output_size` pixels, letterboxed).
+    /// the whole of `output` (`output_size` pixels, letterboxed).
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -137,7 +138,8 @@ impl Renderer {
         output_size: (u32, u32),
     ) {
         self.render_canvas(device, queue, encoder, frame, time);
-        self.composite(device, queue, encoder, frame, time, output, output_size);
+        let area = Area::whole(output_size);
+        self.composite(device, queue, encoder, frame, time, output, area);
     }
 
     /// Draws the next canvas frame (warp or raster, colorize, feedback, bloom) without
@@ -203,9 +205,9 @@ impl Renderer {
         );
     }
 
-    /// Composites the current canvas frame into `output` (`output_size` pixels,
-    /// letterboxed). Doesn't touch the canvas, so it can run any number of times per
-    /// canvas frame.
+    /// Composites the current canvas frame into `area` of `output`, letterboxed, and
+    /// clears the rest of `output` to black. Doesn't touch the canvas, so it can run any
+    /// number of times per canvas frame.
     #[allow(clippy::too_many_arguments)]
     pub fn composite(
         &self,
@@ -215,7 +217,7 @@ impl Renderer {
         frame: &FrameParams,
         time: f32,
         output: &wgpu::TextureView,
-        output_size: (u32, u32),
+        area: Area,
     ) {
         self.composite.render(
             device,
@@ -225,11 +227,12 @@ impl Renderer {
             self.bloom.output(),
             &self.background,
             output,
+            area,
             &composite::uniforms(
                 &crt_glow(frame),
                 time,
                 self.size,
-                output_size,
+                area.size(),
                 self.composite.encode_srgb(),
                 self.background_aspect,
             ),
@@ -255,6 +258,7 @@ impl Renderer {
             self.bloom.output(),
             &self.background,
             output,
+            Area::whole(self.size),
             &composite::uniforms(
                 &crt_glow(frame),
                 time,

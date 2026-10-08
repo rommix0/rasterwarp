@@ -9,6 +9,7 @@ use rasterwarp::gpu;
 use rasterwarp::motion::{Mode, Motion};
 use rasterwarp::params::Params;
 use rasterwarp::passes::Renderer;
+use rasterwarp::passes::composite::Area;
 use rasterwarp::preview::PreviewView;
 use rasterwarp::rate::FrameRate;
 use rasterwarp::source::{ColorImage, GrayImage, test_card};
@@ -109,7 +110,7 @@ fn compositing_again_shows_the_same_canvas_frame() {
         &frame_params,
         0.5,
         &first.view,
-        (OUT_W, OUT_H),
+        Area::whole((OUT_W, OUT_H)),
     );
     queue.submit([encoder.finish()]);
     // A later screen refresh with no new canvas frame due composites again.
@@ -121,7 +122,7 @@ fn compositing_again_shows_the_same_canvas_frame() {
         &frame_params,
         0.5,
         &second.view,
-        (OUT_W, OUT_H),
+        Area::whole((OUT_W, OUT_H)),
     );
     queue.submit([encoder.finish()]);
     let a = read_back(&device, &queue, &first.texture);
@@ -132,6 +133,51 @@ fn compositing_again_shows_the_same_canvas_frame() {
         "output is a single flat color"
     );
     assert!(a == b, "compositing again changed the picture");
+}
+
+#[test]
+fn composites_only_into_the_canvas_area() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "smoke output", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, (640, 360), &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    // The right half of the window, as if a panel covered the left half.
+    let area = Area {
+        x: OUT_W / 2,
+        y: 0,
+        width: OUT_W / 2,
+        height: OUT_H,
+    };
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render_canvas(&device, &queue, &mut encoder, &frame_params, 0.5);
+    renderer.composite(
+        &device,
+        &queue,
+        &mut encoder,
+        &frame_params,
+        0.5,
+        &output.view,
+        area,
+    );
+    queue.submit([encoder.finish()]);
+    let pixels = read_back(&device, &queue, &output.texture);
+    let (rgba, _) = pixels.as_chunks::<4>();
+    let black = [0, 0, 0, 255];
+    let (left, right): (Vec<_>, Vec<_>) = rgba
+        .iter()
+        .enumerate()
+        .partition(|(i, _)| (*i as u32 % OUT_W) < OUT_W / 2);
+    assert!(
+        left.iter().all(|(_, px)| **px == black),
+        "the picture spilled outside its area"
+    );
+    assert!(
+        right.iter().any(|(_, px)| **px != black),
+        "the area shows no picture"
+    );
 }
 
 #[test]
