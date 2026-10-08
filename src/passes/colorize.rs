@@ -5,6 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::blend::ColorizeFrame;
 use crate::fringe;
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
+use crate::params::KeyParams;
 use crate::params::{PALETTE_SIZE, THRESHOLD_COUNT};
 
 /// Matches `struct Colorize` in colorize.wgsl.
@@ -18,7 +19,7 @@ pub struct ColorizeUniforms {
     pub extra: [f32; 4],
 }
 
-pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
+pub fn uniforms(c: &ColorizeFrame, key: &KeyParams) -> ColorizeUniforms {
     let (weights, taps) = fringe::kernel(c.bandwidth, c.ringing);
     ColorizeUniforms {
         settings: [
@@ -32,7 +33,12 @@ pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
             std::array::from_fn(|col| c.thresholds.get(row * 4 + col).copied().unwrap_or(1.0))
         }),
         fringe: std::array::from_fn(|row| std::array::from_fn(|col| weights[row * 4 + col])),
-        extra: [taps as f32, 0.0, 0.0, 0.0],
+        extra: [
+            taps as f32,
+            if key.enabled { 1.0 } else { 0.0 },
+            f32::from(key.levels),
+            0.0,
+        ],
     }
 }
 
@@ -86,7 +92,7 @@ impl ColorizePass {
 mod tests {
     use super::*;
     use crate::blend::FrameParams;
-    use crate::params::Params;
+    use crate::params::{KeyParams, Params};
 
     #[test]
     fn pipeline_matches_shader() {
@@ -111,7 +117,7 @@ mod tests {
         frame.bypass = true;
         frame.palette_linear[1] = [0.25, 0.5, 0.75];
         frame.thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
-        let u = uniforms(&frame);
+        let u = uniforms(&frame, &Params::default().key);
         assert_eq!(u.settings, [6.0, frame.softness, 2.5, 1.0]);
         assert_eq!(u.palette[1], [0.25, 0.5, 0.75, 1.0]);
         assert_eq!(u.thresholds, [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 1.0]]);
@@ -121,14 +127,30 @@ mod tests {
     fn packs_the_smear_kernel() {
         let mut frame = FrameParams::at_rest(&Params::default()).colorize;
         frame.bandwidth = 0.0;
-        let u = uniforms(&frame);
+        let key = Params::default().key;
+        let u = uniforms(&frame, &key);
         assert_eq!(u.extra[0], 1.0, "one tap");
         assert_eq!(u.fringe[0], [1.0, 0.0, 0.0, 0.0]);
         frame.bandwidth = 3.0;
         frame.ringing = 0.4;
         let (weights, taps) = fringe::kernel(3.0, 0.4);
-        let u = uniforms(&frame);
+        let u = uniforms(&frame, &key);
         assert_eq!(u.extra[0], taps as f32);
         assert_eq!(u.fringe[2][1], weights[9]);
+    }
+
+    #[test]
+    fn packs_the_keyed_levels() {
+        let frame = FrameParams::at_rest(&Params::default()).colorize;
+        let key = KeyParams {
+            enabled: true,
+            levels: 0b101,
+        };
+        assert_eq!(uniforms(&frame, &key).extra[1..3], [1.0, 5.0]);
+        let off = KeyParams {
+            enabled: false,
+            ..key
+        };
+        assert_eq!(uniforms(&frame, &off).extra[1], 0.0);
     }
 }

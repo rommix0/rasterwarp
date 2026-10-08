@@ -13,6 +13,7 @@ pub struct CompositeUniforms {
     pub glow: [f32; 4],
     pub misc: [f32; 4],
     pub fit: [f32; 4],
+    pub background: [f32; 4],
 }
 
 /// Fraction of the output covered by the internal image, keeping its aspect ratio.
@@ -26,14 +27,27 @@ pub fn letterbox(output: (u32, u32), internal: (u32, u32)) -> [f32; 2] {
     }
 }
 
+/// The background's uv scale for a "cover" fit: it fills the canvas, cropping whichever
+/// way it is too long.
+pub fn cover(canvas_aspect: f32, image_aspect: f32) -> [f32; 2] {
+    if image_aspect > canvas_aspect {
+        [canvas_aspect / image_aspect, 1.0]
+    } else {
+        [1.0, image_aspect / canvas_aspect]
+    }
+}
+
 pub fn uniforms(
     p: &GlowParams,
     time: f32,
     internal: (u32, u32),
     output: (u32, u32),
     encode_srgb: bool,
+    background_aspect: f32,
 ) -> CompositeUniforms {
     let fit = letterbox(output, internal);
+    let canvas_aspect = internal.0 as f32 / internal.1 as f32;
+    let back = cover(canvas_aspect, background_aspect);
     CompositeUniforms {
         glow: [
             p.bloom_intensity,
@@ -43,6 +57,7 @@ pub fn uniforms(
         ],
         misc: [p.noise, time, internal.0 as f32, internal.1 as f32],
         fit: [fit[0], fit[1], if encode_srgb { 1.0 } else { 0.0 }, 0.0],
+        background: [back[0], back[1], 0.0, 0.0],
     }
 }
 
@@ -61,7 +76,7 @@ impl CompositePass {
                 shader: include_str!("../../shaders/composite.wgsl"),
                 fragment_entry: "fs_main",
                 uniform_size: size_of::<CompositeUniforms>() as u64,
-                textures: 2,
+                textures: 3,
                 format: output_format,
                 blend: None,
             },
@@ -87,11 +102,14 @@ impl CompositePass {
         encoder: &mut wgpu::CommandEncoder,
         image: &wgpu::TextureView,
         bloom: &wgpu::TextureView,
+        background: &wgpu::TextureView,
         output: &wgpu::TextureView,
         uniforms: &CompositeUniforms,
     ) {
         queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(uniforms));
-        let bind_group = self.pass.bind_group(device, &self.uniform, &[image, bloom]);
+        let bind_group = self
+            .pass
+            .bind_group(device, &self.uniform, &[image, bloom, background]);
         self.pass.draw(encoder, output, &bind_group, true);
     }
 }
@@ -111,7 +129,7 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        assert_eq!(size_of::<CompositeUniforms>(), 48);
+        assert_eq!(size_of::<CompositeUniforms>(), 64);
     }
 
     #[test]
@@ -128,16 +146,27 @@ mod tests {
     fn chroma_is_converted_to_uv() {
         let mut p = crate::params::Params::default().glow;
         p.chroma = 2.0;
-        let u = uniforms(&p, 0.0, (1000, 500), (1000, 500), false);
+        let u = uniforms(&p, 0.0, (1000, 500), (1000, 500), false, 1.0);
         assert!((u.glow[3] - 0.002).abs() < 1e-7);
     }
 
     #[test]
     fn srgb_encode_flag_is_packed() {
         let p = crate::params::Params::default().glow;
-        let on = uniforms(&p, 0.0, (1000, 500), (1000, 500), true);
-        let off = uniforms(&p, 0.0, (1000, 500), (1000, 500), false);
+        let on = uniforms(&p, 0.0, (1000, 500), (1000, 500), true, 1.0);
+        let off = uniforms(&p, 0.0, (1000, 500), (1000, 500), false, 1.0);
         assert_eq!(on.fit[2], 1.0);
         assert_eq!(off.fit[2], 0.0);
+    }
+
+    #[test]
+    fn background_covers_the_canvas() {
+        // A square background on a 2:1 canvas: full width, the middle half of its height.
+        assert_eq!(cover(2.0, 1.0), [1.0, 0.5]);
+        // A 4:1 background on a 2:1 canvas: full height, the middle half of its width.
+        assert_eq!(cover(2.0, 4.0), [0.5, 1.0]);
+        let p = crate::params::Params::default().glow;
+        let u = uniforms(&p, 0.0, (1000, 500), (1000, 500), false, 1.0);
+        assert_eq!(u.background, [1.0, 0.5, 0.0, 0.0]);
     }
 }

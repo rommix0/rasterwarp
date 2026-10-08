@@ -24,7 +24,7 @@ use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
 use crate::preview::PreviewView;
-use crate::source::{self, GrayImage};
+use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 
 pub struct App {
@@ -274,6 +274,44 @@ impl State {
         self.clock.reanchor(self.seconds());
     }
 
+    /// Asks for a background image for keyed levels and shows it.
+    fn choose_background(&mut self) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Background image")
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .pick_file();
+        if let Some(path) = picked {
+            match load_background(&path, self.max_texture_side) {
+                Ok(image) => {
+                    self.set_background(Some(&image));
+                    self.ui.background_info = Some(format!(
+                        "Background: {} ({}×{})",
+                        path.display(),
+                        image.width,
+                        image.height
+                    ));
+                    self.ui.load_error = None;
+                }
+                Err(err) => {
+                    log::warn!("{err:#}");
+                    self.ui.load_error = Some(format!("{err:#}"));
+                }
+            }
+        }
+        // The dialog and decoding block the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
+    fn set_background(&mut self, image: Option<&ColorImage>) {
+        self.renderer
+            .set_background(&self.device, &self.queue, image);
+        self.preview
+            .set_background(&self.device, &self.queue, image);
+        if image.is_none() {
+            self.ui.background_info = None;
+        }
+    }
+
     /// Wall-clock seconds since the app started, for the canvas clock.
     fn seconds(&self) -> f64 {
         self.epoch.elapsed().as_secs_f64()
@@ -481,6 +519,12 @@ impl State {
         if actions.choose_folder {
             self.choose_capture_folder();
         }
+        if actions.choose_background {
+            self.choose_background();
+        }
+        if actions.clear_background {
+            self.set_background(None);
+        }
         if actions.stop_recording {
             self.stop_recording();
         }
@@ -574,6 +618,14 @@ fn test_card(ui: &mut UiState) -> GrayImage {
 
 fn describe(name: &str, image: &GrayImage) -> String {
     format!("Source: {name} ({}×{})", image.width, image.height)
+}
+
+/// Loads a background image and checks it fits in a GPU texture.
+fn load_background(path: &Path, max_side: u32) -> anyhow::Result<ColorImage> {
+    let image = source::load_color(path)?;
+    source::ensure_size_fits(image.width, image.height, max_side)
+        .with_context(|| format!("could not load {}", path.display()))?;
+    Ok(image)
 }
 
 /// Loads an image and checks it fits in a GPU texture.

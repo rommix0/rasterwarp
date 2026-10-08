@@ -4,7 +4,7 @@
 use crate::gpu::RenderTarget;
 use crate::motion::{Preview, PreviewSource};
 use crate::passes::Renderer;
-use crate::source::GrayImage;
+use crate::source::{ColorImage, GrayImage};
 
 /// Preview width in pixels; the height follows the canvas aspect ratio.
 pub const WIDTH: u32 = 480;
@@ -79,6 +79,15 @@ impl PreviewView {
 
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {
         self.renderer.set_source(device, queue, image);
+    }
+
+    pub fn set_background(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<&ColorImage>,
+    ) {
+        self.renderer.set_background(device, queue, image);
     }
 
     pub fn clear_feedback(&self, encoder: &mut wgpu::CommandEncoder) {

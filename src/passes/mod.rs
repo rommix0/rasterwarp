@@ -9,7 +9,7 @@ pub mod warp;
 
 use crate::blend::FrameParams;
 use crate::params::GlowParams;
-use crate::source::{self, GrayImage};
+use crate::source::{self, ColorImage, GrayImage};
 
 /// The format of the capture texture that recordings are read from.
 pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -18,6 +18,9 @@ pub struct Renderer {
     size: (u32, u32),
     source: wgpu::TextureView,
     source_aspect: f32,
+    /// What keyed levels show.
+    background: wgpu::TextureView,
+    background_aspect: f32,
     warp: warp::WarpPass,
     raster: raster::RasterPass,
     /// The deflection the previous canvas frame was drawn with, for the raster beam speed.
@@ -45,6 +48,9 @@ impl Renderer {
             size,
             source: source::upload(device, queue, image).create_view(&Default::default()),
             source_aspect: image.aspect(),
+            background: source::upload_color(device, queue, &ColorImage::black())
+                .create_view(&Default::default()),
+            background_aspect: 1.0,
             warp: warp::WarpPass::new(device, w, h),
             raster: raster::RasterPass::new(device),
             previous: None,
@@ -74,6 +80,20 @@ impl Renderer {
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {
         self.source = source::upload(device, queue, image).create_view(&Default::default());
         self.source_aspect = image.aspect();
+    }
+
+    /// Sets what keyed levels show: an image, or black.
+    pub fn set_background(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        image: Option<&ColorImage>,
+    ) {
+        let black = ColorImage::black();
+        let image = image.unwrap_or(&black);
+        self.background =
+            source::upload_color(device, queue, image).create_view(&Default::default());
+        self.background_aspect = image.aspect();
     }
 
     pub fn clear_feedback(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -129,7 +149,7 @@ impl Renderer {
             queue,
             encoder,
             &self.warp.target.view,
-            &colorize::uniforms(&frame.colorize),
+            &colorize::uniforms(&frame.colorize, &frame.key),
         );
         self.feedback.render(
             device,
@@ -167,6 +187,7 @@ impl Renderer {
             encoder,
             self.feedback.output(),
             self.bloom.output(),
+            &self.background,
             output,
             &composite::uniforms(
                 &crt_glow(frame),
@@ -174,6 +195,7 @@ impl Renderer {
                 self.size,
                 output_size,
                 self.composite.encode_srgb(),
+                self.background_aspect,
             ),
         );
     }
@@ -195,6 +217,7 @@ impl Renderer {
             encoder,
             self.feedback.output(),
             self.bloom.output(),
+            &self.background,
             output,
             &composite::uniforms(
                 &crt_glow(frame),
@@ -202,6 +225,7 @@ impl Renderer {
                 self.size,
                 self.size,
                 self.capture.encode_srgb(),
+                self.background_aspect,
             ),
         );
     }

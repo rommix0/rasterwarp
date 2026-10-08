@@ -32,6 +32,8 @@ pub struct UiState {
     pub late: u64,
     pub source_info: String,
     pub load_error: Option<String>,
+    /// The keying background's description, if one is loaded.
+    pub background_info: Option<String>,
     /// The user curve open in the curve editor.
     pub editing_curve: Option<u32>,
     pub canvas: CanvasChoice,
@@ -85,6 +87,8 @@ pub struct UiActions {
     pub start_recording: bool,
     pub stop_recording: bool,
     pub choose_folder: bool,
+    pub choose_background: bool,
+    pub clear_background: bool,
 }
 
 pub fn draw(
@@ -129,6 +133,7 @@ pub fn draw(
                 warp_section(ui, params);
                 raster_section(ui, params);
                 colorize_section(ui, params);
+                key_section(ui, params, state, &mut actions);
                 feedback_section(ui, params, &mut actions);
                 glow_section(ui, params);
             });
@@ -592,6 +597,40 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
                 }
             });
         });
+}
+
+fn key_section(ui: &mut Ui, params: &mut Params, state: &UiState, actions: &mut UiActions) {
+    let levels = params.colorize.levels;
+    let k = &mut params.key;
+    CollapsingHeader::new("Keying").show(ui, |ui| {
+        ui.checkbox(&mut k.enabled, "Level keying");
+        ui.add_enabled_ui(k.enabled, |ui| {
+            ui.label("See-through levels (darkest first):");
+            ui.horizontal_wrapped(|ui| {
+                for level in 0..levels {
+                    let bit = 1u8 << level;
+                    let mut on = k.levels & bit != 0;
+                    if ui.checkbox(&mut on, format!("{}", level + 1)).changed() {
+                        k.levels ^= bit;
+                    }
+                }
+            });
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Background image…").clicked() {
+                actions.choose_background = true;
+            }
+            if state.background_info.is_some() && ui.button("No background").clicked() {
+                actions.clear_background = true;
+            }
+        });
+        ui.small(
+            state
+                .background_info
+                .as_deref()
+                .unwrap_or("No background: see-through levels show black."),
+        );
+    });
 }
 
 fn feedback_section(ui: &mut Ui, params: &mut Params, actions: &mut UiActions) {

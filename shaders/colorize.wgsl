@@ -1,12 +1,13 @@
 // Colorizing: smear edges in the scan direction, posterize brightness into levels at
-// adjustable thresholds, and map each level to a palette color.
+// adjustable thresholds, and map each level to a palette color. Keyed (see-through)
+// levels get alpha 0; the output is premultiplied (color times alpha).
 
 struct Colorize {
     settings: vec4<f32>, // levels, softness, cycle offset (levels), bypass (0 or 1)
     palette: array<vec4<f32>, 8>, // linear RGB
     thresholds: array<vec4<f32>, 2>, // 7 thresholds; only the first levels - 1 are used
     fringe: array<vec4<f32>, 12>, // 48 smear weights: [k] applies to the pixel k to the left
-    extra: vec4<f32>, // smear taps in use, unused, unused, unused
+    extra: vec4<f32>, // smear taps in use, keying on (0 or 1), see-through level mask, unused
 };
 
 @group(0) @binding(0) var<uniform> u: Colorize;
@@ -49,6 +50,13 @@ fn smeared(pos: vec2<i32>) -> f32 {
     return g;
 }
 
+// 0 for a see-through level while keying, 1 otherwise.
+fn opacity(level: f32) -> f32 {
+    let mask = u32(u.extra.z);
+    let see_through = u.extra.y > 0.5 && ((mask >> u32(level)) & 1u) == 1u;
+    return select(1.0, 0.0, see_through);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let g = smeared(vec2<i32>(in.pos.xy));
@@ -64,5 +72,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let i1 = min(i0 + 1.0, levels - 1.0);
     let cycle = u.settings.z;
     let color = mix(palette_at(i0 + cycle, n), palette_at(i1 + cycle, n), x - i0);
-    return vec4<f32>(color, 1.0);
+    // Keying follows the brightness level, not the (cycling) palette color.
+    let alpha = mix(opacity(i0), opacity(i1), x - i0);
+    return vec4<f32>(color * alpha, alpha);
 }
