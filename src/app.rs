@@ -162,8 +162,8 @@ impl State {
             .flags
             .contains(wgpu::DownlevelFlags::SURFACE_VIEW_FORMATS);
         let composite_format = if srgb_view_ok { srgb_format } else { format };
-        // Fifo (vsync) keeps the per-frame feedback semantics at 60 fps. RASTERWARP_UNCAPPED=1
-        // opts into Mailbox (uncapped, no tearing) to measure the real render cost.
+        // Fifo (vsync) presents every refresh. RASTERWARP_UNCAPPED=1 opts into Mailbox
+        // (no vsync wait, no tearing); canvas frames are paced by the frame rate either way.
         let uncapped = std::env::var("RASTERWARP_UNCAPPED").is_ok_and(|v| v == "1");
         let present_mode = if uncapped && caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
             wgpu::PresentMode::Mailbox
