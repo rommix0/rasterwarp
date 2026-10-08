@@ -88,11 +88,14 @@ These findings from the manuals shape the design. Page references are in the res
   - Colorizer level count, bypass, raster enabled, raster line count, key enabled and key level mask all switch at `t >= 0.5`.
   - The slave flag is resolved per bank before blending.
 - **Oscillators**, compared pairwise by index i:
-  - If A[i] and B[i] have the same waveform, target, input and sync, one slot is used. Its numeric fields (frequency, amplitude, phase, phase speed, LFO rate and depth) are lerped and its weight is 1.
+  - If A[i] and B[i] have the same waveform, target, input and sync, one slot is used. Its numeric fields (frequency, amplitude, phase offset, LFO depth) are lerped and its weight is 1. Its phase speed and LFO rate glide (see below).
   - Otherwise two slots are used: A[i]'s settings with weight `1 − t`, and B[i]'s with weight `t`.
   - `t` is clamped to [0,1] for these weights.
   - The total is never more than 8 slots.
-- **Frame-sync phase continuity:** each oscillator's phase term is `phase + phase_speed · time` for Free sync and `phase` for Frame sync. Lerping phase speeds could make the wave jump. To avoid that, the phase-speed contribution is kept as an *accumulated phase* per bank oscillator, which the app advances each frame by `phase_speed · dt`, and the accumulated phases are lerped.
+- **Speeds glide (phase continuity):** each oscillator's phase term is `phase + accumulated phase` for Free sync and `phase` for Frame sync. The accumulated phase is a running total that the app advances each canvas frame by `phase_speed · dt`, so changing a speed never makes the wave jump.
+  - During a ramp, a one-slot oscillator keeps **one** running phase, advanced each frame at `lerp(speed_A, speed_B, t)` (clamped to the phase-speed range, so overshooting curves overshoot the speed too). Its speed therefore moves evenly from A's to B's along the ramp curve. LFO phase and the palette cycle offset glide the same way.
+  - Two-slot (crossfading) oscillators keep a running phase per side, each at its own side's speed.
+  - (Plan 1 lerped two accumulated phases that each ran at their own bank's speed. That spun the wave faster than either bank in mid-ramp, by more the longer the ramp: 4 cycles instead of 2.5 for 0.5 → 2 cycles/s over 2 s.)
 - **No transition running:** `blend(on_air, on_air, 0.0, None)`.
 
 ### Oscillator extras
@@ -122,6 +125,7 @@ These findings from the manuals shape the design. Page references are in the res
 - **Stop:** freezes the counter. **Reset:** instantly shows cue 1 with the counter at 0.
 - **Loop:** when the last ramp finishes and the counter passes the last cue's end, return to cue 1 (an instant reset) and run again.
 - The counter is driven by animation time, so Pause freezes it.
+- The counter is kept in exact ticks of 1/120000 s. Every program frame period and the 1/24 s cue frame are whole numbers of ticks, so a cue starts on the first canvas frame at or after its start time at every frame rate, with no rounding drift.
 
 ### Renderer interface change
 
@@ -304,8 +308,8 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 
 - `curve.rs`: Linear and S-curve values; endpoints are exact; monotone interpolation never overshoots between in-range points; out-of-range points overshoot; clamping of y; adding and removing points keeps them sorted.
 - `transition.rs`: entering Transition copies the on-air bank; start, progress and completion swap the banks; reversing mid-ramp; Cut during and outside a ramp; paused time doesn't advance.
-- `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous.
-- `sequence.rs`: cues start at their frames; snap-on-overlap; Reset; Loop; Stop freezes.
+- `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous; during a ramp a one-slot oscillator's speed, LFO rate and the palette cycle glide on one shared running phase (2.5 cycles, never faster than B, for 0.5 to 2 cycles/s over a 2 s linear ramp), crossfading oscillators keep their own speeds, and overshooting curves overshoot the speed within its range.
+- `sequence.rs`: cues start at their frames, on exactly the first canvas frame at or after the start time at every program frame rate, including after a rate change mid-run; snap-on-overlap; Reset; Loop; Stop freezes.
 - `motion.rs` preview: none in Live mode; the off-air bank in Transition mode, the destination during a ramp and the new off-air bank after it finishes; none while a sequence is stopped and the selected cue while it runs; the preview clocks advance with the preview's parameters; a source change is reported so the trails can be cleared.
 - `capture`:
   - Pure pieces: file naming; frame rates (fractions, labels, frame periods); the canvas clock (frames due for a rate and elapsed time, catch-up capped at 4 with late frames counted, no drift at 23.976 over an hour, pause and re-anchoring without a jump, offline one frame per refresh); row-padding removal; ring-slot rotation; drop counting when the channel is full; Stop after N seconds.

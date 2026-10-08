@@ -1,7 +1,7 @@
 //! Ties the modes together: which parameters the panel edits, how time moves
 //! ramps and phase clocks forward, and what the renderer draws.
 
-use crate::blend::{Clocks, FrameParams, blend};
+use crate::blend::{Clocks, FrameParams, advance_ramp, blend};
 use crate::curve::CurveLibrary;
 use crate::params::Params;
 use crate::rate::TICKS_PER_SECOND;
@@ -149,9 +149,17 @@ impl Motion {
         match self.mode {
             Mode::Live => self.rest.advance(&self.ab.banks[self.ab.on_air], dt),
             Mode::Transition => {
-                self.rest.advance(&self.ab.banks[self.ab.on_air], dt);
-                if self.ab.ramp().is_some() {
-                    self.target.advance(&self.ab.banks[self.ab.off_air()], dt);
+                let on_air = &self.ab.banks[self.ab.on_air];
+                match self.ab.ramp() {
+                    Some(ramp) => advance_ramp(
+                        &mut self.rest,
+                        &mut self.target,
+                        on_air,
+                        &self.ab.banks[self.ab.off_air()],
+                        self.curves.eval(self.ab.curve, ramp.progress),
+                        dt,
+                    ),
+                    None => self.rest.advance(on_air, dt),
                 }
                 if self.ab.advance(dt) == Some(AbEvent::Finished) {
                     self.rest = self.target;
@@ -170,10 +178,19 @@ impl Motion {
                 }
                 match seq.view() {
                     SeqView::Rest(p) => self.rest.advance(p, dt),
-                    SeqView::Ramp { from, to, .. } => {
-                        self.rest.advance(from, dt);
-                        self.target.advance(to, dt);
-                    }
+                    SeqView::Ramp {
+                        from,
+                        to,
+                        progress,
+                        curve,
+                    } => advance_ramp(
+                        &mut self.rest,
+                        &mut self.target,
+                        from,
+                        to,
+                        self.curves.eval(curve, progress),
+                        dt,
+                    ),
                 }
             }
         }
@@ -257,6 +274,7 @@ impl Motion {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::curve::CurveRef;
 
     /// Ticks in `seconds` of animation time.
     fn secs(seconds: f64) -> i64 {
@@ -390,19 +408,26 @@ mod tests {
         m.advance(secs(0.3));
         m.trigger();
         m.advance(secs(1.0)); // halfway through the ramp
+        let before = osc0_phase(&m);
         m.cut();
         assert_eq!(m.ab.on_air, 1);
-        // The destination's clock (0.15 at the trigger, then 2 cycles/s) is on screen.
-        let expected = |secs: f64| (0.15 + 2.0 * secs).rem_euclid(1.0) as f32;
-        assert!(phase_step(osc0_phase(&m), expected(1.0)).abs() < 1e-3);
-        let mut last = osc0_phase(&m);
+        // The sweep's one running clock stays on screen, so the cut doesn't jump...
+        let at_cut = osc0_phase(&m);
+        assert!(
+            phase_step(before, at_cut).abs() < 1e-5,
+            "phase jumped at the cut"
+        );
+        let (mut last, mut turned) = (at_cut, 0.0);
         for _ in 0..100 {
             m.advance(secs(0.01));
             let now = osc0_phase(&m);
-            assert!(phase_step(last, now).abs() < 0.1, "phase jumped after cut");
+            let step = phase_step(last, now);
+            assert!(step.abs() < 0.1, "phase jumped after cut");
+            turned += step;
             last = now;
         }
-        assert!(phase_step(last, expected(2.0)).abs() < 1e-3);
+        // ...and then runs at the destination's 2 cycles/s.
+        assert!((turned - 2.0).abs() < 1e-3, "turned {turned} cycles in 1 s");
     }
 
     #[test]
@@ -427,6 +452,58 @@ mod tests {
             !matches!(m.sequence.as_ref().unwrap().view(), SeqView::Ramp { .. }),
             "ramp finished"
         );
+    }
+
+    /// Runs `frames` canvas frames at 60 fps. Returns how far oscillator 1 turned
+    /// (cycles, unwrapped) and its fastest speed (cycles per second).
+    fn track_osc0(m: &mut Motion, frames: u32) -> (f32, f32) {
+        let period = crate::rate::FrameRate::whole(60).period_ticks();
+        let mut last = osc0_phase(m);
+        let (mut turned, mut fastest) = (0.0, 0.0_f32);
+        for _ in 0..frames {
+            m.advance(period);
+            let now = osc0_phase(m);
+            let step = phase_step(last, now);
+            turned += step;
+            fastest = fastest.max(step.abs() * 60.0);
+            last = now;
+        }
+        (turned, fastest)
+    }
+
+    #[test]
+    fn transition_glides_phase_speed_from_a_to_b() {
+        let mut m = Motion::new(Params::default());
+        m.editable().warp.oscillators[0].phase_speed = 0.5;
+        m.set_mode(Mode::Transition);
+        m.editable().warp.oscillators[0].phase_speed = 2.0;
+        m.ab.curve = CurveRef::Linear;
+        m.trigger();
+        // Over the 2 s ramp the speed rises evenly from 0.5 to 2.0 cycles/s, so the
+        // wave turns about 2.5 cycles and never runs faster than B.
+        let (turned, fastest) = track_osc0(&mut m, 121);
+        assert!(m.ab.ramp().is_none(), "the ramp finished");
+        assert!((turned - 2.5).abs() < 0.05, "turned {turned} cycles");
+        assert!(fastest <= 2.0 + 1e-3, "peaked at {fastest} cycles/s");
+    }
+
+    #[test]
+    fn sequence_ramp_glides_phase_speed_from_cue_to_cue() {
+        let mut m = Motion::new(Params::default());
+        m.editable().warp.oscillators[0].phase_speed = 0.5;
+        m.set_mode(Mode::Sequence);
+        let seq = m.sequence_mut();
+        seq.add_cue();
+        let cue = seq.selected_cue_mut();
+        cue.params.warp.oscillators[0].phase_speed = 2.0;
+        cue.curve = CurveRef::Linear;
+        seq.set_start_frame(1, 24);
+        seq.set_duration(1, 48);
+        seq.run();
+        track_osc0(&mut m, 60); // 1 s resting on cue 1; the ramp starts at frame 24
+        let (turned, fastest) = track_osc0(&mut m, 120); // the 2 s ramp
+        assert!((turned - 2.5).abs() < 0.05, "turned {turned} cycles");
+        assert!(fastest <= 2.0 + 1e-3, "peaked at {fastest} cycles/s");
     }
 
     #[test]

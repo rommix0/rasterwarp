@@ -31,13 +31,68 @@ impl Clocks {
     pub fn advance(&mut self, p: &Params, dt: f32) {
         let dt = f64::from(dt);
         for (i, osc) in p.warp.oscillators.iter().enumerate() {
-            if osc.sync == OscSync::Free {
-                self.osc[i] += f64::from(osc.phase_speed) * dt;
-            }
-            self.lfo[i] += f64::from(osc.lfo_rate) * dt;
+            self.advance_osc(i, osc.sync, osc.phase_speed, osc.lfo_rate, dt);
         }
         self.cycle += f64::from(p.colorize.cycle_speed) * dt;
     }
+
+    fn advance_osc(&mut self, i: usize, sync: OscSync, phase_speed: f32, lfo_rate: f32, dt: f64) {
+        if sync == OscSync::Free {
+            self.osc[i] += f64::from(phase_speed) * dt;
+        }
+        self.lfo[i] += f64::from(lfo_rate) * dt;
+    }
+}
+
+/// Advances a running ramp's clocks by `dt` seconds, where `t` is the curve-mapped
+/// progress (as passed to [`blend`]).
+///
+/// A clock read by a sweeping oscillator (one slot, lerped between the two sides)
+/// advances on both sides at the lerped rate. Both sides start a ramp equal, so they
+/// stay equal, and the oscillator's speed glides from `from`'s to `to`'s along the
+/// curve. (Lerping two clocks that each ran at their own side's rate would spin the wave
+/// faster than either side, more so the longer the ramp.) Clocks that only crossfading
+/// oscillators read run at their own side's rates. The palette cycle always glides.
+pub fn advance_ramp(
+    from_clocks: &mut Clocks,
+    to_clocks: &mut Clocks,
+    from: &Params,
+    to: &Params,
+    t: f32,
+    dt: f32,
+) {
+    let mut glides = [false; OSCILLATOR_COUNT];
+    let a_osc = from.warp.effective_oscillators();
+    let b_osc = to.warp.effective_oscillators();
+    for (a, b) in a_osc.iter().zip(&b_osc) {
+        if sweeps(a, b) {
+            glides[a.1] = true;
+        }
+    }
+    let dt64 = f64::from(dt);
+    for (i, glide) in glides.into_iter().enumerate() {
+        let (a, b) = (&from.warp.oscillators[i], &to.warp.oscillators[i]);
+        if glide {
+            // A sweeping oscillator reads this clock with the same sync on both sides.
+            let phase_speed = lerp_in(a.phase_speed, b.phase_speed, t, ranges::PHASE_SPEED);
+            let lfo_rate = lerp_in(a.lfo_rate, b.lfo_rate, t, ranges::LFO_RATE);
+            for clocks in [&mut *from_clocks, &mut *to_clocks] {
+                clocks.advance_osc(i, a.sync, phase_speed, lfo_rate, dt64);
+            }
+        } else {
+            from_clocks.advance_osc(i, a.sync, a.phase_speed, a.lfo_rate, dt64);
+            to_clocks.advance_osc(i, b.sync, b.phase_speed, b.lfo_rate, dt64);
+        }
+    }
+    let (a, b) = (&from.colorize, &to.colorize);
+    let cycle = f64::from(lerp_in(
+        a.cycle_speed,
+        b.cycle_speed,
+        t,
+        ranges::CYCLE_SPEED,
+    )) * dt64;
+    from_clocks.cycle += cycle;
+    to_clocks.cycle += cycle;
 }
 
 /// One oscillator as the warp shader runs it.
@@ -124,6 +179,13 @@ fn same_shape(a: &Oscillator, b: &Oscillator) -> bool {
         && a.envelope == b.envelope
 }
 
+/// True when two effective oscillators (with the clocks they read) sweep in one slot.
+/// Only when both read the same clock: clocks are unwrapped running totals, so lerping
+/// between two different clocks would spin through every cycle separating them.
+fn sweeps(a: &(Oscillator, usize), b: &(Oscillator, usize)) -> bool {
+    same_shape(&a.0, &b.0) && a.1 == b.1
+}
+
 fn slot(
     index: usize,
     osc: &Oscillator,
@@ -166,10 +228,7 @@ pub fn blend(
     let mut oscillators = Vec::with_capacity(MAX_SLOTS);
     for i in 0..OSCILLATOR_COUNT {
         let ((oa, ca), (ob, cb)) = (a_osc[i], b_osc[i]);
-        // Sweep in one slot only when both sides read the same clock: clocks are
-        // unwrapped running totals, so lerping between two different clocks would
-        // spin through every cycle separating them.
-        if same_shape(&oa, &ob) && ca == cb {
+        if sweeps(&a_osc[i], &b_osc[i]) {
             let phase = lerp_phase(
                 f64::from(oa.phase) + from_clocks.osc[ca],
                 f64::from(ob.phase) + to_clocks.osc[cb],
@@ -436,6 +495,64 @@ mod tests {
         c.advance(&p, 0.5);
         assert!((c.osc[0] - 0.25).abs() < 1e-9);
         assert_eq!(c.osc[1], 0.0);
+    }
+
+    #[test]
+    fn ramp_glides_sweeping_speeds_on_both_sides() {
+        let mut a = Params::default();
+        a.warp.oscillators[0].phase_speed = 0.5;
+        a.warp.oscillators[0].lfo_rate = 1.0;
+        a.colorize.cycle_speed = 1.0;
+        let mut b = a;
+        b.warp.oscillators[0].phase_speed = 2.0;
+        b.warp.oscillators[0].lfo_rate = 3.0;
+        b.colorize.cycle_speed = 3.0;
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 0.25, 2.0);
+        // A quarter of the way: 0.875 cycles/s, LFO 1.5 Hz, cycle 1.5 levels/s, for 2 s.
+        assert!((from.osc[0] - 1.75).abs() < 1e-6);
+        assert!((from.lfo[0] - 3.0).abs() < 1e-6);
+        assert!((from.cycle - 3.0).abs() < 1e-6);
+        assert_eq!(from, to, "both sides stay on one clock");
+    }
+
+    #[test]
+    fn ramp_keeps_crossfading_oscillators_at_their_own_speeds() {
+        let mut a = Params::default();
+        a.warp.oscillators[0].phase_speed = 0.5;
+        let mut b = a;
+        b.warp.oscillators[0].waveform = Waveform::Square;
+        b.warp.oscillators[0].phase_speed = 2.0;
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 0.5, 1.0);
+        assert!((from.osc[0] - 0.5).abs() < 1e-6);
+        assert!((to.osc[0] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn overshooting_curves_push_speeds_past_the_destination_within_range() {
+        let mut a = Params::default();
+        a.warp.oscillators[0].phase_speed = 0.0;
+        let mut b = a;
+        b.warp.oscillators[0].phase_speed = 3.0;
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 1.2, 1.0);
+        assert!((from.osc[0] - 3.6).abs() < 1e-5, "past B's 3.0");
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 1.6, 1.0);
+        let top = f64::from(*ranges::PHASE_SPEED.end());
+        assert!((from.osc[0] - top).abs() < 1e-6, "clamped to the range");
+    }
+
+    #[test]
+    fn ramp_holds_frame_synced_oscillators() {
+        let mut a = Params::default();
+        a.warp.oscillators[0].sync = OscSync::Frame;
+        a.warp.oscillators[0].phase_speed = 1.0;
+        let b = a;
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 0.5, 1.0);
+        assert_eq!((from.osc[0], to.osc[0]), (0.0, 0.0));
     }
 
     #[test]
