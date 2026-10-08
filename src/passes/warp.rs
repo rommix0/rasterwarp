@@ -15,15 +15,24 @@ pub struct OscUniform {
     pub lfo: [f32; 4],
 }
 
-/// Matches `struct Warp` in warp.wgsl.
+/// Matches `struct Deflection` in deflection.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct WarpUniforms {
     pub frame: [f32; 4],
     pub transform: [f32; 4],
     pub source_size: [f32; 4],
+    pub look: [f32; 4],
+    pub seed: [u32; 4],
     pub osc: [OscUniform; MAX_SLOTS],
 }
+
+/// The deflection functions shared with the raster pass, followed by the warp shader.
+const SHADER: &str = concat!(
+    include_str!("../../shaders/deflection.wgsl"),
+    "\n",
+    include_str!("../../shaders/warp.wgsl")
+);
 
 /// Size of the source inside the frame (frame height = 1), fitted so the whole
 /// source is visible.
@@ -35,7 +44,14 @@ pub fn source_fit(frame_aspect: f32, source_aspect: f32) -> [f32; 2] {
     }
 }
 
-pub fn uniforms(w: &WarpFrame, time: f32, frame_aspect: f32, source_aspect: f32) -> WarpUniforms {
+/// `canvas_height` (pixels) converts the line jitter to frame heights.
+pub fn uniforms(
+    w: &WarpFrame,
+    time: f32,
+    frame_aspect: f32,
+    source_aspect: f32,
+    canvas_height: u32,
+) -> WarpUniforms {
     let fit = source_fit(frame_aspect, source_aspect);
     let count = w.oscillators.len().min(MAX_SLOTS);
     let mut osc = [OscUniform::zeroed(); MAX_SLOTS];
@@ -46,6 +62,13 @@ pub fn uniforms(w: &WarpFrame, time: f32, frame_aspect: f32, source_aspect: f32)
         frame: [time, frame_aspect, w.drift, count as f32],
         transform: [w.zoom, w.rotation, w.offset[0], w.offset[1]],
         source_size: [fit[0], fit[1], 0.0, 0.0],
+        look: [
+            w.line_jitter / canvas_height as f32,
+            w.axis_wander,
+            0.0,
+            0.0,
+        ],
+        seed: [w.seed, 0, 0, 0],
         osc,
     }
 }
@@ -89,7 +112,7 @@ impl WarpPass {
             device,
             &PassDesc {
                 label: "warp",
-                shader: include_str!("../../shaders/warp.wgsl"),
+                shader: SHADER,
                 fragment_entry: "fs_main",
                 uniform_size: size_of::<WarpUniforms>() as u64,
                 textures: 1,
@@ -138,9 +161,9 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // Osc = 3 x vec4 = 48 bytes; Warp = 3 x vec4 + 8 x Osc = 432 bytes.
+        // Osc = 3 x vec4 = 48 bytes; Deflection = 5 x vec4 + 8 x Osc = 464 bytes.
         assert_eq!(size_of::<OscUniform>(), 48);
-        assert_eq!(size_of::<WarpUniforms>(), 432);
+        assert_eq!(size_of::<WarpUniforms>(), 464);
     }
 
     #[test]
@@ -157,7 +180,7 @@ mod tests {
     fn packs_oscillator_slots() {
         let p = Params::default();
         let frame = FrameParams::at_rest(&p);
-        let u = uniforms(&frame.warp, 2.0, 16.0 / 9.0, 1.0);
+        let u = uniforms(&frame.warp, 2.0, 16.0 / 9.0, 1.0, 1080);
         assert_eq!(u.frame[0], 2.0);
         assert_eq!(u.frame[3], 4.0, "slot count");
         // Default oscillator 2: triangle, Y target, U input, oscillator index 1.
@@ -179,8 +202,19 @@ mod tests {
         let clocks = crate::blend::Clocks::default();
         let frame = crate::blend::blend(&a, &b, 0.5, Some(0.5), &clocks, &clocks);
         assert_eq!(frame.warp.oscillators.len(), MAX_SLOTS);
-        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0);
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 1080);
         assert_eq!(u.frame[3], MAX_SLOTS as f32, "slot count");
         assert!(u.osc[MAX_SLOTS - 1].wave[1] > 0.0, "last slot is packed");
+    }
+
+    #[test]
+    fn packs_line_jitter_in_frame_heights_and_the_seed() {
+        let mut frame = FrameParams::at_rest(&Params::default());
+        frame.warp.line_jitter = 4.0;
+        frame.warp.axis_wander = 0.6;
+        frame.warp.seed = 77;
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 800);
+        assert_eq!(u.look, [0.005, 0.6, 0.0, 0.0]);
+        assert_eq!(u.seed, [77, 0, 0, 0]);
     }
 }

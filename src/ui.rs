@@ -456,6 +456,10 @@ fn warp_section(ui: &mut Ui, params: &mut Params) {
             ui.add(Slider::new(&mut warp.offset[0], ranges::OFFSET).text("offset x"));
             ui.add(Slider::new(&mut warp.offset[1], ranges::OFFSET).text("offset y"));
             ui.add(Slider::new(&mut warp.drift, ranges::DRIFT).text("analog drift"));
+            ui.add(Slider::new(&mut warp.axis_wander, ranges::AXIS_WANDER).text("axis wander"));
+            ui.add(
+                Slider::new(&mut warp.line_jitter, ranges::LINE_JITTER).text("line jitter (px)"),
+            );
             ui.checkbox(
                 &mut warp.slave_4_to_3,
                 "Slave osc 4 to osc 3 (sine/cosine pair)",

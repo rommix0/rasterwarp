@@ -367,19 +367,22 @@ fn render_still(
     image: &GrayImage,
     size: (u32, u32),
 ) -> Vec<u8> {
+    render_frame(device, queue, &FrameParams::at_rest(params), image, size)
+}
+
+/// Like `render_still`, for a frame with its own seed or other frame values.
+fn render_frame(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &FrameParams,
+    image: &GrayImage,
+    size: (u32, u32),
+) -> Vec<u8> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let output = gpu::RenderTarget::new(device, "still", size.0, size.1, format);
     let mut renderer = Renderer::new(device, queue, format, size, image);
     let mut encoder = device.create_command_encoder(&Default::default());
-    renderer.render(
-        device,
-        queue,
-        &mut encoder,
-        &FrameParams::at_rest(params),
-        0.0,
-        &output.view,
-        size,
-    );
+    renderer.render(device, queue, &mut encoder, frame, 0.0, &output.view, size);
     queue.submit([encoder.finish()]);
     read_back(device, queue, &output.texture)
 }
@@ -457,6 +460,51 @@ fn edges_smear_only_to_their_right() {
     assert!(
         fringe.iter().all(|&x| x >= edge),
         "smear only to the right: {fringe:?}"
+    );
+}
+
+#[test]
+fn line_jitter_shifts_each_row_by_at_most_the_amount() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (256, 64);
+    // Vertical stripes 8 pixels wide; the first white stripe starts at x = 8.
+    let image = GrayImage {
+        width: size.0,
+        height: size.1,
+        pixels: (0..size.0 * size.1)
+            .map(|i| if i % size.0 % 16 < 8 { 0 } else { 255 })
+            .collect(),
+    };
+    let mut params = flat_params();
+    params.colorize.bypass = true;
+    let starts = |pixels: &[u8]| -> Vec<u32> {
+        (0..size.1)
+            .map(|y| first_bright(pixels, size.0, y).expect("a white stripe"))
+            .collect()
+    };
+    let still = starts(&render_still(&device, &queue, &params, &image, size));
+    assert!(still.iter().all(|&x| x == 8), "no jitter: {still:?}");
+
+    params.warp.line_jitter = 4.0;
+    let mut frame = FrameParams::at_rest(&params);
+    frame.warp.seed = 5;
+    let a = render_frame(&device, &queue, &frame, &image, size);
+    let again = render_frame(&device, &queue, &frame, &image, size);
+    assert!(a == again, "the same frame jitters the same way");
+    let jittered = starts(&a);
+    assert!(
+        jittered.iter().all(|&x| x.abs_diff(8) <= 5),
+        "rows move by at most the jitter (plus a pixel of resampling): {jittered:?}"
+    );
+    let distinct: std::collections::BTreeSet<_> = jittered.iter().collect();
+    assert!(distinct.len() >= 4, "rows move differently: {jittered:?}");
+    frame.warp.seed = 6;
+    let next = render_frame(&device, &queue, &frame, &image, size);
+    assert!(
+        starts(&next) != jittered,
+        "the next frame jitters differently"
     );
 }
 

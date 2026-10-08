@@ -106,7 +106,7 @@ impl Renderer {
             queue,
             encoder,
             &self.source,
-            &warp::uniforms(&frame.warp, time, aspect, self.source_aspect),
+            &warp::uniforms(&frame.warp, time, aspect, self.source_aspect, self.size.1),
         );
         self.colorize.render(
             device,
