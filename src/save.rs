@@ -4,6 +4,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -70,14 +71,15 @@ struct Envelope<'a, T> {
     contents: &'a T,
 }
 
-/// `contents` as a pretty-printed file of the given format.
-pub fn to_json<T: Serialize>(format: &str, contents: &T) -> String {
+/// `contents` as a pretty-printed file of the given format. Fails only for a path that
+/// isn't valid text, which JSON can't hold.
+pub fn to_json<T: Serialize>(format: &str, contents: &T) -> Result<String> {
     let file = Envelope {
         format,
         version: VERSION,
         contents,
     };
-    serde_json::to_string_pretty(&file).expect("saved settings always serialize")
+    serde_json::to_string_pretty(&file).context("could not write the settings as JSON")
 }
 
 /// Reads a file of the given format.
@@ -109,7 +111,8 @@ fn kind(format: &str) -> Option<&'static str> {
 }
 
 /// Writes `text` to `path` without ever leaving a half-written file: it goes to
-/// `<name>.tmp` first and is then renamed over the target. Creates the folder if needed.
+/// `<name>.tmp` first, is flushed to disk, and is then renamed over the target. Creates
+/// the folder if needed.
 pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent()
         && !dir.as_os_str().is_empty()
@@ -119,7 +122,12 @@ pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let written = fs::write(&tmp, text).and_then(|()| fs::rename(&tmp, path));
+    let written = fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
+        .and_then(|()| fs::rename(&tmp, path));
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
     }
@@ -138,7 +146,7 @@ struct Preset {
     params: Params,
 }
 
-pub fn preset_json(params: &Params) -> String {
+pub fn preset_json(params: &Params) -> Result<String> {
     to_json(PRESET_FORMAT, &Preset { params: *params })
 }
 
@@ -151,7 +159,7 @@ pub fn read_preset(text: &str) -> Result<Loaded<Params>> {
 }
 
 pub fn save_preset(path: &Path, params: &Params) -> Result<()> {
-    write_atomic(path, &preset_json(params))
+    write_atomic(path, &preset_json(params)?)
 }
 
 pub fn load_preset(path: &Path) -> Result<Loaded<Params>> {
@@ -213,7 +221,7 @@ pub fn load_settings(dir: &Path) -> Settings {
 pub fn save_settings(dir: &Path, settings: &Settings) -> Result<()> {
     write_atomic(
         &dir.join(SETTINGS_FILE),
-        &to_json(SETTINGS_FORMAT, settings),
+        &to_json(SETTINGS_FORMAT, settings)?,
     )
 }
 
@@ -229,6 +237,10 @@ pub(crate) fn temp_dir(name: &str) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::CaptureMode;
+    use crate::capture::encode::VideoFormat;
+    use crate::curve::CurveRef;
+    use crate::motion::Mode;
     use crate::params::{Axis, Envelope, OscInput, OscSync, Waveform};
 
     /// Every parameter changed from its default.
@@ -276,7 +288,7 @@ mod tests {
     #[test]
     fn presets_round_trip() {
         for p in [Params::default(), changed()] {
-            let loaded = read_preset(&preset_json(&p)).unwrap();
+            let loaded = read_preset(&preset_json(&p).unwrap()).unwrap();
             assert_eq!(loaded.value, p);
             assert!(!loaded.newer);
         }
@@ -316,7 +328,7 @@ mod tests {
 
     #[test]
     fn unknown_options_fall_back_to_their_defaults() {
-        let mut json: Value = serde_json::from_str(&preset_json(&changed())).unwrap();
+        let mut json: Value = serde_json::from_str(&preset_json(&changed()).unwrap()).unwrap();
         json["params"]["warp"]["oscillators"][0]["waveform"] = "wobble".into();
         json["params"]["warp"]["oscillators"][1]["input"] = 7.into();
         let p = read_preset(&json.to_string()).unwrap().value;
@@ -396,6 +408,37 @@ mod tests {
         assert_eq!(
             data_dir_in(Some(OsStr::new(""))),
             Path::new("rasterwarp-data")
+        );
+    }
+
+    /// The names files are written with. Changing one breaks every file saved so far.
+    fn names<T: Serialize>(values: impl IntoIterator<Item = T>) -> Vec<Value> {
+        values
+            .into_iter()
+            .map(|v| serde_json::to_value(v).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn saved_names_never_change() {
+        let strings = |names: &[&str]| names.iter().map(|n| Value::from(*n)).collect::<Vec<_>>();
+        assert_eq!(
+            names(Waveform::ALL),
+            strings(&["sine", "triangle", "ramp", "square", "noise"])
+        );
+        assert_eq!(names([Axis::X, Axis::Y]), strings(&["x", "y"]));
+        assert_eq!(names(OscInput::ALL), strings(&["u", "v", "radius", "time"]));
+        assert_eq!(names(OscSync::ALL), strings(&["free", "frame"]));
+        assert_eq!(names(Envelope::ALL), strings(&["constant", "swell"]));
+        assert_eq!(
+            names(Mode::ALL),
+            strings(&["live", "transition", "sequence"])
+        );
+        assert_eq!(names(CaptureMode::ALL), strings(&["real-time", "offline"]));
+        assert_eq!(names(VideoFormat::ALL), strings(&["hevc", "ffv1"]));
+        assert_eq!(
+            names([CurveRef::Linear, CurveRef::SCurve, CurveRef::Custom(3)]),
+            strings(&["linear", "s-curve", "custom:3"])
         );
     }
 

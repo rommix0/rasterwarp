@@ -132,7 +132,7 @@ impl Project {
         ab.on_air = t.on_air.min(1);
         ab.duration = t.duration.clamp(*DURATION.start(), *DURATION.end());
         ab.curve = curves.resolve(t.curve);
-        let sequence = self.sequence.as_ref().map(|s| {
+        let mut sequence = self.sequence.as_ref().map(|s| {
             let cues: Vec<Cue> = s
                 .cues
                 .iter()
@@ -143,6 +143,10 @@ impl Project {
                 .collect();
             Sequence::from_cues(&cues, s.selected, s.looping)
         });
+        if self.mode == Mode::Sequence && sequence.is_none() {
+            // As when switching into Sequence mode: one cue from the on-air bank.
+            sequence = Some(Sequence::new(ab.banks[ab.on_air]));
+        }
         Motion::restored(self.mode, ab, sequence, curves)
     }
 
@@ -184,7 +188,7 @@ pub struct Autosave {
 pub fn save_autosave(dir: &Path, autosave: &Autosave) -> Result<()> {
     save::write_atomic(
         &dir.join(AUTOSAVE_FILE),
-        &save::to_json(PROJECT_FORMAT, autosave),
+        &save::to_json(PROJECT_FORMAT, autosave)?,
     )
 }
 
@@ -213,7 +217,7 @@ pub fn restore_autosave(dir: &Path) -> Result<Option<Loaded<Autosave>>> {
     }
 }
 
-pub fn project_json(project: &Project) -> String {
+pub fn project_json(project: &Project) -> Result<String> {
     save::to_json(PROJECT_FORMAT, project)
 }
 
@@ -227,7 +231,7 @@ pub fn read_project(text: &str) -> Result<Loaded<Project>> {
 }
 
 pub fn save_project(path: &Path, project: &Project) -> Result<()> {
-    save::write_atomic(path, &project_json(project))
+    save::write_atomic(path, &project_json(project)?)
 }
 
 pub fn load_project(path: &Path) -> Result<Loaded<Project>> {
@@ -272,17 +276,20 @@ mod tests {
     }
 
     fn project_with(edit: impl FnOnce(&mut Value)) -> Project {
-        let mut json: Value = serde_json::from_str(&project_json(&project())).unwrap();
+        let mut json: Value = serde_json::from_str(&project_json(&project()).unwrap()).unwrap();
         edit(&mut json);
         read_project(&json.to_string()).unwrap().value
     }
 
     #[test]
     fn projects_round_trip() {
-        let p = project();
+        let p = Project {
+            background: Some(PathBuf::from(r"C:\images\key.png")),
+            ..project()
+        };
         assert_eq!(p.mode, Mode::Transition);
         assert_eq!(p.sequence.as_ref().unwrap().cues.len(), 2);
-        let loaded = read_project(&project_json(&p)).unwrap();
+        let loaded = read_project(&project_json(&p).unwrap()).unwrap();
         assert_eq!(loaded.value, p);
         assert!(!loaded.newer);
     }
@@ -312,6 +319,19 @@ mod tests {
             j.as_object_mut().unwrap().remove("transition");
         });
         assert_eq!(p.transition, Transition::default());
+    }
+
+    #[test]
+    fn sequence_mode_without_a_sequence_gets_one() {
+        let hand_edited = Project {
+            mode: Mode::Sequence,
+            sequence: None,
+            ..Project::default()
+        };
+        let checked = hand_edited.checked();
+        let cues = checked.sequence.as_ref().expect("a sequence is built");
+        assert_eq!(cues.cues.len(), 1);
+        assert_eq!(checked.checked(), checked, "so it doesn't read as edited");
     }
 
     #[test]
@@ -386,7 +406,7 @@ mod tests {
 
     #[test]
     fn a_preset_is_not_a_project() {
-        let preset = save::preset_json(&Params::default());
+        let preset = save::preset_json(&Params::default()).unwrap();
         let err = read_project(&preset).unwrap_err();
         assert_eq!(err.to_string(), "this is a preset, not a project");
     }
