@@ -12,6 +12,7 @@ pub mod gpu;
 pub mod motion;
 pub mod params;
 pub mod passes;
+pub mod presets;
 pub mod preview;
 pub mod rate;
 pub mod save;
