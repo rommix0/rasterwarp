@@ -258,11 +258,11 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
   - It is mapped *forward* into the frame by the same deflection functions as the warp pass. Those move into a shared `shaders/deflection.wgsl`, prepended to both passes.
   - The global transform is applied in the forward direction.
   - The vertex is shifted horizontally by its line's timing jitter (see "Line timing jitter").
-  - The vertex is then offset by ±half the beam width along the line's normal, estimated from neighbouring samples.
-- **Fragment shader:** brightness = source luminance at (u, v) × a Gaussian beam profile across the line × compensation gain. **Additive blending** into a cleared target, so packed lines overlap and brighten.
+  - The vertex is then offset by ±one beam width along the line's normal, estimated from neighbouring samples. The beam's Gaussian has σ = half the beam width, so the strip's edges are already dark.
+- **Fragment shader:** brightness = source luminance at (u, v) × the Gaussian beam profile across the line × compensation gain. **Additive blending** into a cleared target, so packed lines overlap and brighten.
 - **Compensation gain:**
-  - **Area term:** `mix(1, spacing_ratio, compensation)`, where `spacing_ratio` is the local line spacing divided by the rest spacing, found by finite difference of the vertical deflection with respect to v.
-  - **Speed term:** `1 + speed_compensation · min(speed / 0.5, 4)`. `speed` is how fast the vertex is moving, in frame heights per second, found by evaluating the deflected position at `time` and `time − 1/60`.
+  - **Area term:** `mix(1, spacing_ratio, compensation)`, where `spacing_ratio` is the local line spacing divided by the rest spacing. The local spacing is the distance to the next line, measured across this line (finite difference with respect to v). The rest spacing is the undeflected, unzoomed spacing, so zooming in brightens spread-out lines too, as the hardware's compensator responded to raster size.
+  - **Speed term:** `1 + speed_compensation · min(speed / 0.5, 4)`. `speed` is how far the vertex moved since the previous canvas frame, in frame heights per second of animation time. The renderer keeps the previous canvas frame's deflection uniforms and evaluates the vertex with both; this captures oscillators, drift, LFOs and transform ramps alike (oscillator phases are CPU-integrated clocks, so a `time − 1/60` re-evaluation isn't possible). While paused, no animation time passes and the speed term is 1.
   - The two terms are multiplied. This follows the manual's compensator, which boosted brightness with both raster area and animation speed (|d/dt|), so fast sweeps don't fade.
 - **Warp vs raster:** warp is an inverse map and raster is a forward map, so the same oscillator settings give equivalent but mirrored ripples. This is documented in the UI tooltip.
 - The composite's painted-on scanline overlay is forced to strength 0 while raster mode is on, because the lines are real.
@@ -271,8 +271,8 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
 
 - `thresholds: [f32; 7]`, ascending. Only the first `levels − 1` are used.
 - **Default:** even spacing (`k/levels`). An **Even** button restores it.
-- **UI:** one slider per active threshold. Each slider is constrained between its neighbours.
-- **Shader:** the level index is the number of thresholds at or below g. Softness blends across a threshold within ±softness/2.
+- **UI:** one 0–1 slider per active threshold; a changed threshold is clamped between its neighbours. Changing the level count re-spaces the thresholds evenly.
+- **Shader:** the level index is the number of thresholds at or below g (so order doesn't matter, even when an overshooting curve pushes blended thresholds past each other). Softness blends across each threshold over a width of `softness / levels` of brightness centred on it, the same width as before thresholds existed (an even band is `1 / levels`).
 
 ### Edge fringing (scan direction)
 
@@ -282,6 +282,8 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
   - The weights are the first 48 samples of the impulse response of a 2-pole low-pass (biquad) filter, computed on the CPU. Its cutoff is `1 / (2π · bandwidth)` cycles per pixel, and its Q is `0.5 + 1.5 · ringing`: 0.5 is critically damped (no overshoot), and 2.0 rings visibly.
   - The weights are normalized to sum to 1, so flat areas are unchanged. They are recomputed each frame from the blended params, so fringing can change during transitions and sequence ramps.
   - At bandwidth 0 the kernel is a single tap of 1 (no fringing).
+  - Below a bandwidth of 2/π ≈ 0.64 px, the cutoff would pass a quarter of the pixel rate, where the filter's poles turn negative and the smear would ring even at ringing 0. So the kernel at 2/π is faded toward a single tap as the bandwidth goes to 0.
+  - The last 12 taps are faded out with a raised cosine, so a long ringing tail doesn't end in a visible step. Taps below 1e-5 are skipped.
 - A causal per-row filter pass (an IIR run along each row in turn) is left for the later broadcast effect (see "Later").
 
 ### Rotation axis wander
@@ -300,12 +302,12 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
 ### Level keying
 
 - **Params:** `key.enabled` (default off) and `key.levels: u8` (bitmask of see-through levels, default bit 0).
-- **Background image:** loaded with an `rfd` file dialog, converted to RGBA, and size-checked with `ensure_fits`. It is drawn with a "cover" fit and is not a `Params` field. Without a background image, keyed areas show black.
+- **Background image:** loaded with an `rfd` file dialog ("Background image…" in the Keying section, "No background" clears it), converted to sRGB RGBA, and size-checked like sources. It is drawn with a "cover" fit and is not a `Params` field. Without a background image, keyed areas show black.
 - **Pipeline:**
-  - Colorize writes alpha = 0 for see-through levels and 1 otherwise (blended across softness).
-  - Feedback carries alpha with the same `max` rule.
+  - Colorize writes alpha = 0 for see-through levels and 1 otherwise (blended across softness), keyed by brightness level rather than by the cycling palette color. Its output is **premultiplied** (color × alpha).
+  - Feedback carries alpha with the same `max` rule. Because the color is premultiplied, a trail over the background fades at the feedback rate, not twice as fast.
   - Bloom ignores alpha.
-  - Composite output = `background · (1 − α) + image · α + bloom`, then the CRT effects.
+  - Composite output = `background · (1 − α) + image + bloom` (the image already premultiplied), then the CRT effects.
 - Capture records the composited result. Alpha export is out of scope.
 
 ---
@@ -327,7 +329,7 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 - `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous; during a ramp a one-slot oscillator's speed, LFO rate and the palette cycle glide on one shared running phase (2.5 cycles, never faster than B, for 0.5 to 2 cycles/s over a 2 s linear ramp), crossfading oscillators keep their own speeds, and overshooting curves overshoot the speed within its range.
 - `sequence.rs`: cues start at their frames, on exactly the first canvas frame at or after the start time at every program frame rate, including after a rate change mid-run; snap-on-overlap; Reset; Loop; Stop freezes.
 - Edge fringing kernel: weights sum to 1; bandwidth 0 gives a single tap of 1; at ringing 0 the step response never overshoots; above 0 it overshoots; the weights change continuously with bandwidth and ringing.
-- Line jitter hash: the same line and animation frame count always give the same value; values lie in [−1, 1]; neighbouring lines and consecutive frames differ.
+- `params.rs`: even thresholds per level count; new defaults inside their ranges. `blend.rs`: the new look fields lerp and clamp, raster on/line count and keying switch at 0.5. `motion.rs`: the line jitter seed counts animation frames and holds while paused.
 - `motion.rs` preview: none in Live mode; the off-air bank in Transition mode, the destination during a ramp and the new off-air bank after it finishes; none while a sequence is stopped and the selected cue while it runs; the preview clocks advance with the preview's parameters; a source change is reported so the trails can be cleared.
 - `capture`:
   - Pure pieces: file naming; frame rates (fractions, labels, frame periods); the canvas clock (frames due for a rate and elapsed time, catch-up capped at 4 with late frames counted, no drift at 23.976 over an hour, pause and re-anchoring without a jump, offline one frame per refresh); row-padding removal; ring-slot rotation; drop counting when the channel is full; Stop after N seconds.
@@ -338,7 +340,7 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
   - With a vertical stretch, the gaps widen.
   - Colorizer thresholds: a gradient source gives level boundaries at the threshold positions.
   - Edge fringing: a vertical black-to-white edge gets intermediate levels only on its right side; the left side is unchanged.
-  - Line jitter: amount 0 renders identically to no jitter; with an amount set, each row of a vertical-stripe source is shifted by at most that many pixels, and different rows are shifted differently.
+  - Line jitter (the hash lives in the shader, so it is tested here): amount 0 renders with no shift; with an amount set, each row of a vertical-stripe source is shifted by at most that many pixels (plus a pixel of resampling), different rows are shifted differently, the same seed renders identically, and the next seed differently.
   - Keying: see-through level pixels show the background color.
   - Canvas resize: rendering after `resize` produces the new size.
   - Preview: a second `Renderer` at 480×270 renders into an offscreen texture of that size.
