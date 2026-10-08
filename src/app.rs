@@ -19,6 +19,7 @@ use crate::blend::FrameParams;
 use crate::canvas::{self, CanvasChoice};
 use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
+use crate::capture::still;
 use crate::clock::{CanvasClock, Pacing};
 use crate::files_ui::FileActions;
 use crate::gpu;
@@ -785,6 +786,33 @@ impl State {
         self.epoch.elapsed().as_secs_f64()
     }
 
+    /// Saves the canvas as it is now as a PNG in the captures folder.
+    fn save_still(&mut self) {
+        let (device, queue, renderer) = (&self.device, &self.queue, &self.renderer);
+        let (frame_params, time) = (&self.frame_params, self.time as f32);
+        let size = renderer.size();
+        let saved = still::grab(device, queue, size, |encoder, view| {
+            renderer.composite_capture(device, queue, encoder, frame_params, time, view)
+        })
+        .and_then(|rgba| {
+            let now = chrono::Local::now().naive_local();
+            still::save(&self.ui.capture.settings.folder, now, size, &rgba)
+        });
+        // Reading back and encoding a large frame stalls; that must not make canvas
+        // frames late.
+        self.clock.reanchor(self.seconds());
+        match saved {
+            Ok(path) => {
+                self.ui.capture.error = None;
+                self.ui.capture.saved = Some(format!("Saved {}", path.display()));
+            }
+            Err(err) => {
+                log::warn!("{err:#}");
+                self.ui.capture.error = Some(format!("Still not saved: {err:#}"));
+            }
+        }
+    }
+
     fn start_recording(&mut self) {
         self.ui.capture.saved = None;
         let started = Recorder::start(
@@ -1022,6 +1050,9 @@ impl State {
         }
         if self.ui.rate != self.clock.rate() && self.recorder.is_none() {
             self.clock.set_rate(self.ui.rate, self.seconds());
+        }
+        if actions.save_still {
+            self.save_still();
         }
         if actions.start_recording && self.recorder.is_none() {
             self.start_recording();

@@ -5,6 +5,7 @@ use rasterwarp::blend::FrameParams;
 use rasterwarp::capture::CaptureMode;
 use rasterwarp::capture::encode::VideoFormat;
 use rasterwarp::capture::recorder::{RecordSettings, Recorder};
+use rasterwarp::capture::still;
 use rasterwarp::gpu;
 use rasterwarp::motion::{Mode, Motion};
 use rasterwarp::params::Params;
@@ -209,6 +210,31 @@ fn renders_the_preview_offscreen() {
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .expect("poll device");
+}
+
+#[test]
+fn grabs_a_still_of_the_whole_canvas() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let canvas = (256, 144);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut renderer = Renderer::new(&device, &queue, format, canvas, &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render_canvas(&device, &queue, &mut encoder, &frame_params, 0.5);
+    queue.submit([encoder.finish()]);
+    let rgba = still::grab(&device, &queue, renderer.size(), |encoder, view| {
+        renderer.composite_capture(&device, &queue, encoder, &frame_params, 0.5, view)
+    })
+    .expect("grab a still");
+    assert_eq!(rgba.len(), (canvas.0 * canvas.1 * 4) as usize);
+    let (pixels, _) = rgba.as_chunks::<4>();
+    assert!(
+        pixels.iter().any(|px| *px != pixels[0]),
+        "the still is a single flat color"
+    );
+    assert!(pixels.iter().all(|px| px[3] == 255), "the canvas is opaque");
 }
 
 #[test]

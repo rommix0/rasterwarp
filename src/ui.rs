@@ -80,6 +80,7 @@ pub struct UiActions {
     /// Switch the canvas to this size.
     pub apply_canvas: Option<(u32, u32)>,
     pub start_recording: bool,
+    pub save_still: bool,
     pub stop_recording: bool,
     pub choose_folder: bool,
     pub choose_background: bool,
@@ -88,6 +89,10 @@ pub struct UiActions {
     /// The part of the window left for the canvas, in points (beside the panel).
     pub canvas_rect: Option<egui::Rect>,
 }
+
+/// F12 saves a still of the canvas.
+const SAVE_STILL: egui::KeyboardShortcut =
+    egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F12);
 
 /// Tab hides and shows the control panel; not while a text field has the keyboard.
 const TOGGLE_PANEL: egui::KeyboardShortcut =
@@ -101,6 +106,9 @@ pub fn draw(
 ) -> UiActions {
     let mut actions = UiActions::default();
     files_ui::shortcuts(ui.ctx(), &mut actions.files);
+    if ui.input_mut(|i| i.consume_shortcut(&SAVE_STILL)) {
+        actions.save_still = true;
+    }
     if !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|i| i.consume_shortcut(&TOGGLE_PANEL))
     {
         state.panel_hidden = !state.panel_hidden;
@@ -273,6 +281,13 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions
                         );
                     }
                 }
+            }
+            if ui
+                .button("Save still")
+                .on_hover_text("Save the canvas as a PNG in the captures folder (F12)")
+                .clicked()
+            {
+                actions.save_still = true;
             }
             if let Some(saved) = &capture.saved {
                 ui.small(saved);

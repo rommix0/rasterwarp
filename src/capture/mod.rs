@@ -3,6 +3,7 @@
 pub mod encode;
 pub mod readback;
 pub mod recorder;
+pub mod still;
 
 use encode::VideoFormat;
 
