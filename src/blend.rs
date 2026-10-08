@@ -5,8 +5,9 @@ use std::f32::consts::PI;
 use std::ops::RangeInclusive;
 
 use crate::params::{
-    Axis, ColorizeParams, Envelope, FeedbackParams, GlowParams, OSCILLATOR_COUNT, OscInput,
-    OscSync, Oscillator, PALETTE_SIZE, Params, Waveform, ranges, srgb_to_linear,
+    Axis, ColorizeParams, Envelope, FeedbackParams, GlowParams, KeyParams, OSCILLATOR_COUNT,
+    OscInput, OscSync, Oscillator, PALETTE_SIZE, Params, RasterParams, THRESHOLD_COUNT, Waveform,
+    ranges, srgb_to_linear,
 };
 
 /// At most two slots per oscillator (one per bank) while their settings differ.
@@ -120,6 +121,12 @@ pub struct WarpFrame {
     pub offset: [f32; 2],
     pub drift: f32,
     pub oscillators: Vec<OscSlot>,
+    /// Canvas pixels.
+    pub line_jitter: f32,
+    pub axis_wander: f32,
+    /// Seeds the line jitter: the number of animation frames so far (see
+    /// `Motion::frame`), so the jitter is new every frame and frozen while paused.
+    pub seed: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -131,6 +138,11 @@ pub struct ColorizeFrame {
     /// Palette cycle offset in levels, wrapped to [0, levels).
     pub cycle: f32,
     pub bypass: bool,
+    /// Not necessarily ascending: an overshooting curve can push them past each other.
+    /// The shader counts the thresholds at or below a brightness, so order doesn't matter.
+    pub thresholds: [f32; THRESHOLD_COUNT],
+    pub bandwidth: f32,
+    pub ringing: f32,
 }
 
 /// Everything the renderer needs for one frame.
@@ -140,6 +152,8 @@ pub struct FrameParams {
     pub colorize: ColorizeFrame,
     pub feedback: FeedbackParams,
     pub glow: GlowParams,
+    pub raster: RasterParams,
+    pub key: KeyParams,
 }
 
 impl FrameParams {
@@ -265,10 +279,31 @@ pub fn blend(
             ],
             drift: lerp_in(a.drift, b.drift, t, ranges::DRIFT),
             oscillators,
+            line_jitter: lerp_in(a.line_jitter, b.line_jitter, t, ranges::LINE_JITTER),
+            axis_wander: lerp_in(a.axis_wander, b.axis_wander, t, ranges::AXIS_WANDER),
+            seed: 0,
         },
         colorize,
         feedback: blend_feedback(&from.feedback, &to.feedback, t),
         glow: blend_glow(&from.glow, &to.glow, t),
+        raster: blend_raster(&from.raster, &to.raster, t),
+        key: if t >= 0.5 { to.key } else { from.key },
+    }
+}
+
+fn blend_raster(a: &RasterParams, b: &RasterParams, t: f32) -> RasterParams {
+    let discrete = if t >= 0.5 { b } else { a };
+    RasterParams {
+        enabled: discrete.enabled,
+        lines: discrete.lines,
+        beam_width: lerp_in(a.beam_width, b.beam_width, t, ranges::BEAM_WIDTH),
+        compensation: lerp_in(a.compensation, b.compensation, t, ranges::COMPENSATION),
+        speed_compensation: lerp_in(
+            a.speed_compensation,
+            b.speed_compensation,
+            t,
+            ranges::SPEED_COMPENSATION,
+        ),
     }
 }
 
@@ -298,6 +333,11 @@ fn blend_colorize(
         palette_linear,
         cycle: cycle as f32,
         bypass: discrete.bypass,
+        thresholds: std::array::from_fn(|i| {
+            lerp_in(a.thresholds[i], b.thresholds[i], t, ranges::THRESHOLD)
+        }),
+        bandwidth: lerp_in(a.bandwidth, b.bandwidth, t, ranges::BANDWIDTH),
+        ringing: lerp_in(a.ringing, b.ringing, t, ranges::RINGING),
     }
 }
 
@@ -379,6 +419,39 @@ mod tests {
         let late = blend(&a, &b, 0.5, Some(0.5), &rest(), &rest());
         assert_eq!((early.colorize.levels, early.colorize.bypass), (6, false));
         assert_eq!((late.colorize.levels, late.colorize.bypass), (3, true));
+    }
+
+    #[test]
+    fn look_fields_lerp_and_switch_at_midpoint() {
+        let a = Params::default();
+        let mut b = a;
+        b.colorize.thresholds[0] = 0.5;
+        b.colorize.bandwidth = 3.0;
+        b.colorize.ringing = 0.6;
+        b.warp.line_jitter = 4.0;
+        b.warp.axis_wander = 0.55;
+        b.raster.enabled = true;
+        b.raster.lines = 200;
+        b.raster.beam_width = 2.2;
+        b.key.enabled = true;
+        b.key.levels = 0b110;
+        let early = blend(&a, &b, 0.25, Some(0.25), &rest(), &rest());
+        let expected = a.colorize.thresholds[0] + 0.25 * (0.5 - a.colorize.thresholds[0]);
+        assert!((early.colorize.thresholds[0] - expected).abs() < 1e-6);
+        assert!((early.colorize.bandwidth - 1.5).abs() < 1e-6);
+        assert!((early.colorize.ringing - 0.3).abs() < 1e-6);
+        assert!((early.warp.line_jitter - 1.0).abs() < 1e-6);
+        assert!((early.warp.axis_wander - 0.25).abs() < 1e-6);
+        assert!((early.raster.beam_width - 1.45).abs() < 1e-6);
+        assert_eq!((early.raster.enabled, early.raster.lines), (false, 600));
+        assert_eq!(early.key, a.key);
+        let late = blend(&a, &b, 0.5, Some(0.5), &rest(), &rest());
+        assert_eq!((late.raster.enabled, late.raster.lines), (true, 200));
+        assert_eq!(late.key, b.key);
+        // Overshooting curves stay inside each range.
+        let over = blend(&a, &b, 3.0, Some(0.9), &rest(), &rest());
+        assert_eq!(over.warp.line_jitter, *ranges::LINE_JITTER.end());
+        assert_eq!(over.raster.beam_width, *ranges::BEAM_WIDTH.end());
     }
 
     #[test]

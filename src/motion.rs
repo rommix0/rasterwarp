@@ -59,6 +59,8 @@ pub struct Motion {
     preview: Clocks,
     /// The preview source the `preview` clocks belong to.
     preview_shown: Option<PreviewSource>,
+    /// Animation frames so far (calls to `advance`); seeds the line jitter.
+    frames: u32,
 }
 
 impl Motion {
@@ -72,6 +74,7 @@ impl Motion {
             target: Clocks::default(),
             preview: Clocks::default(),
             preview_shown: None,
+            frames: 0,
         }
     }
 
@@ -146,6 +149,7 @@ impl Motion {
     /// [`TICKS_PER_SECOND`]); the app passes one canvas frame period.
     pub fn advance(&mut self, ticks: i64) {
         let dt = (ticks as f64 / TICKS_PER_SECOND as f64) as f32;
+        self.frames = self.frames.wrapping_add(1);
         match self.mode {
             Mode::Live => self.rest.advance(&self.ab.banks[self.ab.on_air], dt),
             Mode::Transition => {
@@ -210,10 +214,9 @@ impl Motion {
     /// and the selected cue while a sequence runs.
     pub fn preview(&self) -> Option<Preview> {
         let (source, p) = self.preview_params()?;
-        Some(Preview {
-            source,
-            frame: blend(p, p, 0.0, None, &self.preview, &self.preview),
-        })
+        let mut frame = blend(p, p, 0.0, None, &self.preview, &self.preview);
+        frame.warp.seed = self.frames;
+        Some(Preview { source, frame })
     }
 
     fn preview_params(&self) -> Option<(PreviewSource, &Params)> {
@@ -236,6 +239,12 @@ impl Motion {
 
     /// What the renderer draws this frame.
     pub fn frame(&self) -> FrameParams {
+        let mut frame = self.blended();
+        frame.warp.seed = self.frames;
+        frame
+    }
+
+    fn blended(&self) -> FrameParams {
         let rest = |p: &Params| blend(p, p, 0.0, None, &self.rest, &self.rest);
         match self.mode {
             Mode::Live => rest(&self.ab.banks[self.ab.on_air]),
@@ -344,6 +353,19 @@ mod tests {
         // The output moved 0.4 × 0.5 = 0.2 cycles while the preview held still.
         let off = moved - still - 0.2;
         assert!((off - off.round()).abs() < 1e-4, "{moved} vs {still}");
+    }
+
+    #[test]
+    fn jitter_seed_counts_animation_frames() {
+        let mut m = Motion::new(Params::default());
+        assert_eq!(m.frame().warp.seed, 0);
+        m.advance(secs(1.0 / 60.0));
+        m.advance(secs(1.0 / 60.0));
+        assert_eq!(m.frame().warp.seed, 2);
+        // A paused frame doesn't advance animation, so the seed (and jitter) holds.
+        assert_eq!(m.frame().warp.seed, 2);
+        m.set_mode(Mode::Transition);
+        assert_eq!(m.preview().unwrap().frame.warp.seed, 2);
     }
 
     #[test]

@@ -30,10 +30,21 @@ pub mod ranges {
     pub const SCANLINE_COUNT: RangeInclusive<f32> = 100.0..=1080.0;
     pub const CHROMA: RangeInclusive<f32> = 0.0..=4.0;
     pub const NOISE: RangeInclusive<f32> = 0.0..=0.5;
+    pub const THRESHOLD: RangeInclusive<f32> = 0.0..=1.0;
+    pub const BANDWIDTH: RangeInclusive<f32> = 0.0..=8.0;
+    pub const RINGING: RangeInclusive<f32> = 0.0..=1.0;
+    pub const LINE_JITTER: RangeInclusive<f32> = 0.0..=10.0;
+    pub const AXIS_WANDER: RangeInclusive<f32> = 0.0..=1.0;
+    pub const RASTER_LINES: RangeInclusive<u32> = 100..=1200;
+    pub const BEAM_WIDTH: RangeInclusive<f32> = 0.5..=4.0;
+    pub const COMPENSATION: RangeInclusive<f32> = 0.0..=1.0;
+    pub const SPEED_COMPENSATION: RangeInclusive<f32> = 0.0..=1.0;
 }
 
 pub const OSCILLATOR_COUNT: usize = 4;
 pub const PALETTE_SIZE: usize = 8;
+/// One threshold between each pair of neighbouring levels.
+pub const THRESHOLD_COUNT: usize = PALETTE_SIZE - 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Waveform {
@@ -138,6 +149,11 @@ pub struct WarpParams {
     /// Oscillator 4 follows oscillator 3 a quarter cycle behind (sine/cosine pair),
     /// keeping its own target and amplitude.
     pub slave_4_to_3: bool,
+    /// Time-base error: each line shifts sideways by up to this many canvas pixels,
+    /// new every animation frame.
+    pub line_jitter: f32,
+    /// How far the rotation pivot wanders while rotated, like a real deflection yoke.
+    pub axis_wander: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -149,6 +165,34 @@ pub struct ColorizeParams {
     /// Levels per second the palette rotates through.
     pub cycle_speed: f32,
     pub bypass: bool,
+    /// Brightness where each level starts, ascending; only the first `levels - 1` are
+    /// used.
+    pub thresholds: [f32; THRESHOLD_COUNT],
+    /// How far edges smear to the right of themselves, in canvas pixels.
+    pub bandwidth: f32,
+    /// How much edges overshoot and ripple after themselves.
+    pub ringing: f32,
+}
+
+/// True raster mode: draw the source as deflected scan lines instead of warping it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RasterParams {
+    pub enabled: bool,
+    pub lines: u32,
+    /// Beam width in canvas pixels.
+    pub beam_width: f32,
+    /// How much packed or spread lines are evened out (the manual's area compensator).
+    pub compensation: f32,
+    /// How much fast-moving lines are brightened so fast sweeps don't fade.
+    pub speed_compensation: f32,
+}
+
+/// Level keying: chosen colorizer levels become see-through, showing a background image.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KeyParams {
+    pub enabled: bool,
+    /// Bit i set: level i is see-through.
+    pub levels: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -179,6 +223,20 @@ pub struct Params {
     pub colorize: ColorizeParams,
     pub feedback: FeedbackParams,
     pub glow: GlowParams,
+    pub raster: RasterParams,
+    pub key: KeyParams,
+}
+
+/// Thresholds spaced evenly for `levels` levels (`k / levels`); unused entries are 1.
+pub fn even_thresholds(levels: u32) -> [f32; THRESHOLD_COUNT] {
+    std::array::from_fn(|i| {
+        let k = i as u32 + 1;
+        if k < levels {
+            k as f32 / levels as f32
+        } else {
+            1.0
+        }
+    })
 }
 
 impl Default for Oscillator {
@@ -238,6 +296,8 @@ impl Default for Params {
                 offset: [0.0, 0.0],
                 drift: 0.2,
                 slave_4_to_3: false,
+                line_jitter: 0.0,
+                axis_wander: 0.15,
             },
             colorize: ColorizeParams {
                 levels: 6,
@@ -254,6 +314,9 @@ impl Default for Params {
                 ],
                 cycle_speed: 0.0,
                 bypass: false,
+                thresholds: even_thresholds(6),
+                bandwidth: 1.0,
+                ringing: 0.2,
             },
             feedback: FeedbackParams {
                 amount: 0.85,
@@ -268,6 +331,17 @@ impl Default for Params {
                 scanline_count: 540.0,
                 chroma: 1.0,
                 noise: 0.04,
+            },
+            raster: RasterParams {
+                enabled: false,
+                lines: 600,
+                beam_width: 1.2,
+                compensation: 1.0,
+                speed_compensation: 0.3,
+            },
+            key: KeyParams {
+                enabled: false,
+                levels: 1,
             },
         }
     }
@@ -349,6 +423,34 @@ mod tests {
         assert!(ranges::SCANLINE_COUNT.contains(&p.glow.scanline_count));
         assert!(ranges::CHROMA.contains(&p.glow.chroma));
         assert!(ranges::NOISE.contains(&p.glow.noise));
+        assert!(
+            p.colorize
+                .thresholds
+                .iter()
+                .all(|t| ranges::THRESHOLD.contains(t))
+        );
+        assert!(ranges::BANDWIDTH.contains(&p.colorize.bandwidth));
+        assert!(ranges::RINGING.contains(&p.colorize.ringing));
+        assert!(ranges::LINE_JITTER.contains(&p.warp.line_jitter));
+        assert!(ranges::AXIS_WANDER.contains(&p.warp.axis_wander));
+        assert!(ranges::RASTER_LINES.contains(&p.raster.lines));
+        assert!(ranges::BEAM_WIDTH.contains(&p.raster.beam_width));
+        assert!(ranges::COMPENSATION.contains(&p.raster.compensation));
+        assert!(ranges::SPEED_COMPENSATION.contains(&p.raster.speed_compensation));
+    }
+
+    #[test]
+    fn even_thresholds_split_brightness_into_equal_bands() {
+        let six = even_thresholds(6);
+        for (k, t) in six.iter().take(5).enumerate() {
+            assert!((t - (k + 1) as f32 / 6.0).abs() < 1e-6);
+        }
+        assert_eq!(&six[5..], &[1.0, 1.0], "unused thresholds");
+        for levels in ranges::LEVELS {
+            let t = even_thresholds(levels);
+            assert!(t.windows(2).all(|w| w[0] <= w[1]), "{levels} levels: {t:?}");
+        }
+        assert_eq!(Params::default().colorize.thresholds, six);
     }
 
     #[test]
