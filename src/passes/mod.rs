@@ -73,8 +73,8 @@ impl Renderer {
         self.feedback.clear(encoder);
     }
 
-    /// Records one frame into `encoder`, ending with a draw into `output`
-    /// (`output_size` pixels, letterboxed).
+    /// Records one frame into `encoder`: draws a canvas frame, then composites it into
+    /// `output` (`output_size` pixels, letterboxed).
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -85,6 +85,20 @@ impl Renderer {
         time: f32,
         output: &wgpu::TextureView,
         output_size: (u32, u32),
+    ) {
+        self.render_canvas(device, queue, encoder, frame, time);
+        self.composite(device, queue, encoder, frame, time, output, output_size);
+    }
+
+    /// Draws the next canvas frame (warp, colorize, feedback, bloom) without showing it.
+    /// Each call advances the feedback trails by one frame.
+    pub fn render_canvas(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameParams,
+        time: f32,
     ) {
         let aspect = self.size.0 as f32 / self.size.1 as f32;
         self.warp.render(
@@ -115,6 +129,22 @@ impl Renderer {
             self.feedback.output(),
             frame.glow.bloom_threshold,
         );
+    }
+
+    /// Composites the current canvas frame into `output` (`output_size` pixels,
+    /// letterboxed). Doesn't touch the canvas, so it can run any number of times per
+    /// canvas frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn composite(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameParams,
+        time: f32,
+        output: &wgpu::TextureView,
+        output_size: (u32, u32),
+    ) {
         self.composite.render(
             device,
             queue,
@@ -132,9 +162,8 @@ impl Renderer {
         );
     }
 
-    /// Draws this frame's composite again into `output`: a canvas-sized texture in
-    /// [`CAPTURE_FORMAT`], with no letterboxing and no UI. Call after `render`, in the
-    /// same encoder.
+    /// Draws the current canvas frame's composite into `output`: a canvas-sized texture
+    /// in [`CAPTURE_FORMAT`], with no letterboxing and no UI.
     pub fn composite_capture(
         &self,
         device: &wgpu::Device,

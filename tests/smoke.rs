@@ -91,6 +91,50 @@ fn renders_after_a_canvas_resize() {
 }
 
 #[test]
+fn compositing_again_shows_the_same_canvas_frame() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let first = gpu::RenderTarget::new(&device, "first", OUT_W, OUT_H, format);
+    let second = gpu::RenderTarget::new(&device, "second", OUT_W, OUT_H, format);
+    let mut renderer = Renderer::new(&device, &queue, format, (640, 360), &test_card(400, 300));
+    let frame_params = FrameParams::at_rest(&Params::default());
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render_canvas(&device, &queue, &mut encoder, &frame_params, 0.5);
+    renderer.composite(
+        &device,
+        &queue,
+        &mut encoder,
+        &frame_params,
+        0.5,
+        &first.view,
+        (OUT_W, OUT_H),
+    );
+    queue.submit([encoder.finish()]);
+    // A later screen refresh with no new canvas frame due composites again.
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.composite(
+        &device,
+        &queue,
+        &mut encoder,
+        &frame_params,
+        0.5,
+        &second.view,
+        (OUT_W, OUT_H),
+    );
+    queue.submit([encoder.finish()]);
+    let a = read_back(&device, &queue, &first.texture);
+    let b = read_back(&device, &queue, &second.texture);
+    let (rgba, _) = a.as_chunks::<4>();
+    assert!(
+        rgba.iter().any(|px| *px != rgba[0]),
+        "output is a single flat color"
+    );
+    assert!(a == b, "compositing again changed the picture");
+}
+
+#[test]
 fn renders_the_preview_offscreen() {
     let Some((device, queue)) = device() else {
         return;
