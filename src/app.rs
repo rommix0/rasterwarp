@@ -270,6 +270,8 @@ impl State {
                 self.ui.load_error = Some(format!("{err:#}"));
             }
         }
+        // Decoding the image stalls; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
     }
 
     /// Wall-clock seconds since the app started, for the canvas clock.
@@ -279,15 +281,17 @@ impl State {
 
     fn start_recording(&mut self) {
         self.ui.capture.saved = None;
-        match Recorder::start(
+        let started = Recorder::start(
             &self.device,
             &self.ui.capture.settings,
             self.renderer.size(),
             self.clock.rate(),
-        ) {
+        );
+        // Opening the encoder stalls, even when it fails; that must not make canvas
+        // frames late.
+        self.clock.reanchor(self.seconds());
+        match started {
             Ok(recorder) => {
-                // Opening the encoder stalls; that must not make canvas frames late.
-                self.clock.reanchor(self.seconds());
                 self.ui.capture.error = None;
                 self.ui.capture.status = Some(recorder.status());
                 self.recorder = Some(recorder);
@@ -405,13 +409,19 @@ impl State {
         self.last_refresh = now;
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
 
+        // While the window is minimized or hidden no canvas frames are drawn; that time
+        // must not count as late frames when it reappears.
         if self.config.width == 0 || self.config.height == 0 {
+            self.clock.reanchor(self.seconds());
             return; // minimized
         }
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => return,
+            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.clock.reanchor(self.seconds());
+                return;
+            }
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
                 return;
