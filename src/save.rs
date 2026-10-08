@@ -151,6 +151,7 @@ pub fn load_preset(path: &Path) -> Result<Loaded<Params>> {
     read_preset(&read_file(path)?).with_context(|| format!("could not open {}", path.display()))
 }
 
+/// A fresh, empty folder for a test's files.
 #[cfg(test)]
 pub(crate) fn temp_dir(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("rasterwarp-test-{name}-{}", std::process::id()));
