@@ -508,6 +508,53 @@ fn line_jitter_shifts_each_row_by_at_most_the_amount() {
     );
 }
 
+/// Rows of column `x` that are brighter than both neighbours: the centres of scan lines.
+fn line_centres(pixels: &[u8], size: (u32, u32), x: u32) -> Vec<u32> {
+    let at = |y: u32| pixels[((y * size.0 + x) * 4) as usize];
+    (1..size.1 - 1)
+        .filter(|&y| at(y) > 100 && at(y) > at(y - 1) && at(y) >= at(y + 1))
+        .collect()
+}
+
+#[test]
+fn raster_mode_draws_separate_scan_lines() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (256, 400);
+    let white = GrayImage {
+        width: size.0,
+        height: size.1,
+        pixels: vec![255; (size.0 * size.1) as usize],
+    };
+    let mut params = flat_params();
+    params.colorize.bypass = true;
+    params.raster.enabled = true;
+    params.raster.lines = 100;
+    let pixels = render_still(&device, &queue, &params, &white, size);
+    let centres = line_centres(&pixels, size, size.0 / 2);
+    assert!(
+        (98..=100).contains(&centres.len()),
+        "{} lines: {centres:?}",
+        centres.len()
+    );
+    assert!(
+        centres.windows(2).all(|w| w[1] - w[0] == 4),
+        "one line every 4 rows: {centres:?}"
+    );
+    let at = |y: u32| pixels[((y * size.0 + size.0 / 2) * 4) as usize];
+    assert!(at(centres[10] + 2) < 40, "dark between lines");
+
+    // Zooming in stretches the raster: the gaps widen.
+    params.warp.zoom = 2.0;
+    let pixels = render_still(&device, &queue, &params, &white, size);
+    let centres = line_centres(&pixels, size, size.0 / 2);
+    assert!(
+        centres.windows(2).all(|w| w[1] - w[0] == 8),
+        "one line every 8 rows: {centres:?}"
+    );
+}
+
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
 /// that buffer copies require.
 fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {

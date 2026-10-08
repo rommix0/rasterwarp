@@ -4,9 +4,11 @@ pub mod bloom;
 pub mod colorize;
 pub mod composite;
 pub mod feedback;
+pub mod raster;
 pub mod warp;
 
 use crate::blend::FrameParams;
+use crate::params::GlowParams;
 use crate::source::{self, GrayImage};
 
 /// The format of the capture texture that recordings are read from.
@@ -17,6 +19,9 @@ pub struct Renderer {
     source: wgpu::TextureView,
     source_aspect: f32,
     warp: warp::WarpPass,
+    raster: raster::RasterPass,
+    /// The deflection the previous canvas frame was drawn with, for the raster beam speed.
+    previous: Option<warp::WarpUniforms>,
     colorize: colorize::ColorizePass,
     feedback: feedback::FeedbackPass,
     bloom: bloom::BloomPass,
@@ -41,6 +46,8 @@ impl Renderer {
             source: source::upload(device, queue, image).create_view(&Default::default()),
             source_aspect: image.aspect(),
             warp: warp::WarpPass::new(device, w, h),
+            raster: raster::RasterPass::new(device),
+            previous: None,
             colorize: colorize::ColorizePass::new(device, w, h),
             feedback: feedback::FeedbackPass::new(device, w, h),
             bloom: bloom::BloomPass::new(device, w, h),
@@ -90,8 +97,8 @@ impl Renderer {
         self.composite(device, queue, encoder, frame, time, output, output_size);
     }
 
-    /// Draws the next canvas frame (warp, colorize, feedback, bloom) without showing it.
-    /// Each call advances the feedback trails by one frame.
+    /// Draws the next canvas frame (warp or raster, colorize, feedback, bloom) without
+    /// showing it. Each call advances the feedback trails by one frame.
     pub fn render_canvas(
         &mut self,
         device: &wgpu::Device,
@@ -101,13 +108,22 @@ impl Renderer {
         time: f32,
     ) {
         let aspect = self.size.0 as f32 / self.size.1 as f32;
-        self.warp.render(
-            device,
-            queue,
-            encoder,
-            &self.source,
-            &warp::uniforms(&frame.warp, time, aspect, self.source_aspect, self.size.1),
-        );
+        let deflection = warp::uniforms(&frame.warp, time, aspect, self.source_aspect, self.size.1);
+        if frame.raster.enabled {
+            let before = self.previous.unwrap_or(deflection);
+            self.raster.render(
+                device,
+                queue,
+                encoder,
+                &self.source,
+                &self.warp.target.view,
+                &raster::uniforms(&frame.raster, &deflection, &before, self.size),
+            );
+        } else {
+            self.warp
+                .render(device, queue, encoder, &self.source, &deflection);
+        }
+        self.previous = Some(deflection);
         self.colorize.render(
             device,
             queue,
@@ -153,7 +169,7 @@ impl Renderer {
             self.bloom.output(),
             output,
             &composite::uniforms(
-                &frame.glow,
+                &crt_glow(frame),
                 time,
                 self.size,
                 output_size,
@@ -181,12 +197,38 @@ impl Renderer {
             self.bloom.output(),
             output,
             &composite::uniforms(
-                &frame.glow,
+                &crt_glow(frame),
                 time,
                 self.size,
                 self.size,
                 self.capture.encode_srgb(),
             ),
         );
+    }
+}
+
+/// The CRT effects the composite applies. Raster mode draws real scan lines, so the
+/// painted-on scanline overlay is off.
+fn crt_glow(frame: &FrameParams) -> GlowParams {
+    let mut glow = frame.glow;
+    if frame.raster.enabled {
+        glow.scanline_strength = 0.0;
+    }
+    glow
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::params::Params;
+
+    #[test]
+    fn raster_mode_turns_off_the_painted_scanlines() {
+        let mut frame = FrameParams::at_rest(&Params::default());
+        assert_eq!(crt_glow(&frame), frame.glow);
+        frame.raster.enabled = true;
+        let glow = crt_glow(&frame);
+        assert_eq!(glow.scanline_strength, 0.0);
+        assert_eq!(glow.bloom_intensity, frame.glow.bloom_intensity);
     }
 }

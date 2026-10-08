@@ -127,6 +127,7 @@ pub fn draw(
                 curves_section(ui, &mut motion.curves, state);
                 let params = motion.editable();
                 warp_section(ui, params);
+                raster_section(ui, params);
                 colorize_section(ui, params);
                 feedback_section(ui, params, &mut actions);
                 glow_section(ui, params);
@@ -521,6 +522,29 @@ fn oscillator_shape(ui: &mut Ui, i: usize, osc: &mut Oscillator) {
     ui.add(Slider::new(&mut osc.phase_speed, ranges::PHASE_SPEED).text("phase speed"));
     ui.add(Slider::new(&mut osc.lfo_rate, ranges::LFO_RATE).text("LFO rate"));
     ui.add(Slider::new(&mut osc.lfo_depth, ranges::LFO_DEPTH).text("LFO depth"));
+}
+
+fn raster_section(ui: &mut Ui, params: &mut Params) {
+    let r = &mut params.raster;
+    CollapsingHeader::new("Raster").show(ui, |ui| {
+        ui.checkbox(&mut r.enabled, "True raster (scan lines)")
+            .on_hover_text(
+                "Draws the source as real scan lines bent by the oscillators. Warp mode \
+                 maps each pixel back to the source and raster mode maps each line forward, \
+                 so the same settings give mirror-image ripples.",
+            );
+        ui.add_enabled_ui(r.enabled, |ui| {
+            ui.add(Slider::new(&mut r.lines, ranges::RASTER_LINES).text("lines"));
+            ui.add(Slider::new(&mut r.beam_width, ranges::BEAM_WIDTH).text("beam width (px)"));
+            ui.add(
+                Slider::new(&mut r.compensation, ranges::COMPENSATION).text("area compensation"),
+            );
+            ui.add(
+                Slider::new(&mut r.speed_compensation, ranges::SPEED_COMPENSATION)
+                    .text("speed compensation"),
+            );
+        });
+    });
 }
 
 fn colorize_section(ui: &mut Ui, params: &mut Params) {
