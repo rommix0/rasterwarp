@@ -13,7 +13,7 @@ Six features, delivered as three implementation plans. Each plan leaves the app 
 |---|---|
 | 1. Motion | A/B transition mode with drawn curves; sequence ramps; oscillator extras (Frame/Free sync, sine/cosine slave, ramp envelope) |
 | 2. Output | Off-air preview overlay; configurable canvas resolution; video capture (HEVC NVENC 4:4:4 or FFV1) via linked FFmpeg libraries, in real-time or frame-accurate offline mode |
-| 3. Look | True raster (scanline) mode; colorizer thresholds; edge fringing; rotation axis wander; level keying over a background image |
+| 3. Look | True raster (scanline) mode; colorizer thresholds; scan-direction edge fringing with ringing; line timing jitter; rotation axis wander; level keying over a background image |
 
 After Plan 2, a **program frame rate** was added (see "Frame rate"): the whole canvas runs at a chosen rate, and recordings use it.
 
@@ -82,7 +82,7 @@ These findings from the manuals shape the design. Page references are in the res
 
 `blend(a: &Params, b: &Params, t: f32, envelope_phase: Option<f32>) -> FrameParams`, where `t` is the curve-mapped progress. `FrameParams` is what the renderer consumes. It holds the global fields and up to **8 weighted oscillator slots**.
 
-- **Numeric fields** (zoom, rotation, offsets, drift, softness, cycle speed, feedback, glow, raster numerics, thresholds, bandwidth, axis wander): `lerp(a, b, t)`. `t` may lie outside [0,1] for overshooting curves. Each result is clamped to its parameter range.
+- **Numeric fields** (zoom, rotation, offsets, drift, softness, feedback, glow, raster numerics, thresholds, bandwidth, ringing, line jitter, axis wander): `lerp(a, b, t)`. `t` may lie outside [0,1] for overshooting curves. Each result is clamped to its parameter range.
 - **Palette colors:** converted to linear, lerped, then clamped to [0,1].
 - **Discrete fields:**
   - Colorizer level count, bypass, raster enabled, raster line count, key enabled and key level mask all switch at `t >= 0.5`.
@@ -257,6 +257,7 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
   - Each vertex has a source position (u along the line, v = line centre).
   - It is mapped *forward* into the frame by the same deflection functions as the warp pass. Those move into a shared `shaders/deflection.wgsl`, prepended to both passes.
   - The global transform is applied in the forward direction.
+  - The vertex is shifted horizontally by its line's timing jitter (see "Line timing jitter").
   - The vertex is then offset by ±half the beam width along the line's normal, estimated from neighbouring samples.
 - **Fragment shader:** brightness = source luminance at (u, v) × a Gaussian beam profile across the line × compensation gain. **Additive blending** into a cleared target, so packed lines overlap and brighten.
 - **Compensation gain:**
@@ -273,13 +274,28 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
 - **UI:** one slider per active threshold. Each slider is constrained between its neighbours.
 - **Shader:** the level index is the number of thresholds at or below g. Softness blends across a threshold within ±softness/2.
 
-### Edge fringing
+### Edge fringing (scan direction)
 
-`colorize.bandwidth`, 0–8 canvas pixels, default 1.0. Before posterizing, the colorize pass blurs the grayscale horizontally with a Gaussian of that σ (7 taps, scaled). Sharp vertical edges then briefly pass through the intermediate levels, so their colors appear as thin fringes. At 0 there is no blur.
+- **Params:** `colorize.bandwidth` (0–8 canvas pixels, default 1.0) sets how far the smear reaches; `colorize.ringing` (0–1, default 0.2) sets overshoot after edges.
+- **Why one-sided:** a video signal is scanned left to right and band-limited by causal filters, so edges smear and ring *after* themselves, to the right (the reference scripts in `xtras/broadcast_effect` show this). Sharp vertical edges briefly pass through the intermediate levels, so their colors appear as thin fringes on the trailing side.
+- **Kernel:** before posterizing, the colorize pass replaces each grayscale pixel with a weighted sum of itself and up to 47 pixels to its **left** (48 taps, in output-frame pixels, so the smear is horizontal on screen in both warp and raster mode).
+  - The weights are the first 48 samples of the impulse response of a 2-pole low-pass (biquad) filter, computed on the CPU. Its cutoff is `1 / (2π · bandwidth)` cycles per pixel, and its Q is `0.5 + 1.5 · ringing`: 0.5 is critically damped (no overshoot), and 2.0 rings visibly.
+  - The weights are normalized to sum to 1, so flat areas are unchanged. They are recomputed each frame from the blended params, so fringing can change during transitions and sequence ramps.
+  - At bandwidth 0 the kernel is a single tap of 1 (no fringing).
+- A causal per-row filter pass (an IIR run along each row in turn) is left for the later broadcast effect (see "Later").
 
 ### Rotation axis wander
 
 `warp.axis_wander`, 0–1, default 0.15. The rotation pivot moves by `axis_wander · 0.02 · |sin(rotation)| ·` (2D slow value noise of time). Both the warp and raster passes apply it.
+
+### Line timing jitter
+
+- **Param:** `warp.line_jitter`, 0–10 canvas pixels, default 0. A normal numeric field, so it lerps during transitions and sequence ramps.
+- Each line gets a horizontal shift of `line_jitter · r`, where `r` is a uniform random value in [−1, 1] from a hash of the line index and the animation frame count (canvas frames that advanced animation, i.e. not paused). The shift is new every such frame, so offline recordings are reproducible and Pause freezes it (paused canvas frames keep the same count).
+  - **Warp mode:** a line is an output pixel row; the row's shift is added to the pixel's x before the inverse deflection.
+  - **Raster mode:** a line is a raster line instance; the shift is added to the vertex x after the forward deflection and global transform.
+- Shifted lines feed the feedback trails like any other output, so trails pick up the raggedness.
+- This is a time-base error (whole lines shift). The per-pixel jitter in the reference scripts (`create_img_jitter`) is a different, fuzzier effect and belongs to the later broadcast effect.
 
 ### Level keying
 
@@ -310,6 +326,8 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 - `transition.rs`: entering Transition copies the on-air bank; start, progress and completion swap the banks; reversing mid-ramp; Cut during and outside a ramp; paused time doesn't advance.
 - `blend.rs`: lerp of numerics including t outside [0,1] with clamping; linear-light palette lerp; discrete fields switch at 0.5; matching oscillators produce one slot and mismatched ones two, weights sum to 1, never more than 8 slots; slave-oscillator derivation; Swell multiplier is 0 at rest, 0 at both ramp ends and 1 at the midpoint; accumulated-phase lerp is continuous; during a ramp a one-slot oscillator's speed, LFO rate and the palette cycle glide on one shared running phase (2.5 cycles, never faster than B, for 0.5 to 2 cycles/s over a 2 s linear ramp), crossfading oscillators keep their own speeds, and overshooting curves overshoot the speed within its range.
 - `sequence.rs`: cues start at their frames, on exactly the first canvas frame at or after the start time at every program frame rate, including after a rate change mid-run; snap-on-overlap; Reset; Loop; Stop freezes.
+- Edge fringing kernel: weights sum to 1; bandwidth 0 gives a single tap of 1; at ringing 0 the step response never overshoots; above 0 it overshoots; the weights change continuously with bandwidth and ringing.
+- Line jitter hash: the same line and animation frame count always give the same value; values lie in [−1, 1]; neighbouring lines and consecutive frames differ.
 - `motion.rs` preview: none in Live mode; the off-air bank in Transition mode, the destination during a ramp and the new off-air bank after it finishes; none while a sequence is stopped and the selected cue while it runs; the preview clocks advance with the preview's parameters; a source change is reported so the trails can be cleared.
 - `capture`:
   - Pure pieces: file naming; frame rates (fractions, labels, frame periods); the canvas clock (frames due for a rate and elapsed time, catch-up capped at 4 with late frames counted, no drift at 23.976 over an hour, pause and re-anchoring without a jump, offline one frame per refresh); row-padding removal; ring-slot rotation; drop counting when the channel is full; Stop after N seconds.
@@ -319,6 +337,8 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
   - Raster mode on a flat white source with no deflection and 100 lines: output rows alternate between lit and dark at the expected period.
   - With a vertical stretch, the gaps widen.
   - Colorizer thresholds: a gradient source gives level boundaries at the threshold positions.
+  - Edge fringing: a vertical black-to-white edge gets intermediate levels only on its right side; the left side is unchanged.
+  - Line jitter: amount 0 renders identically to no jitter; with an amount set, each row of a vertical-stripe source is shifted by at most that many pixels, and different rows are shifted differently.
   - Keying: see-through level pixels show the background color.
   - Canvas resize: rendering after `resize` produces the new size.
   - Preview: a second `Renderer` at 480×270 renders into an offscreen texture of that size.
@@ -327,3 +347,5 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 ## Later (documented, not built now)
 
 Raster sections (up to 5 bands with independent deflection and intensity); the sequential intensity generator; blanking-comparator wipes; modulation matrix / node graph (multipliers, rectifiers, summers, programmed phase lock); MIDI/OSC; audio-driven amplitude ("mouth control"); alpha export (FFV1 with alpha); video backgrounds and live camera; overlapping sequence ramps; persisting curves, cues and presets to disk.
+
+**Broadcast effect** (reference: the hand-made Python scripts in `xtras/broadcast_effect` and `xtras/video fm effect`): treat the output as one scanned signal, FM-modulate luma and QAM-modulate chroma onto carriers, add pink noise and sub-sample time-base jitter, then demodulate (low-pass and FM demod for luma, high-pass and QAM demod for chroma), plus per-pixel horizontal jitter. On the GPU it would be a per-row compute pass with I/Q mixing and low-pass filters instead of the whole-frame Hilbert transform, placed after colorize and feedback and before the CRT display effects. The audio script reuses the video's jitter curve so sound wobbles in sync. Two script behaviours to decide on when porting (both may be part of the look): `f2u` casts to int8 before clipping, so a value of 1.0 wraps to black; and the QAM decode returns both chroma components negated (`v, u = QAM2sig(...)` of `u·sin − v·cos`), which turns hue by 180°.
