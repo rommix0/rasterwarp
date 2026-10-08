@@ -553,17 +553,20 @@ fn raster_section(ui: &mut Ui, params: &mut Params) {
 }
 
 fn colorize_section(ui: &mut Ui, params: &mut Params) {
+    let key = &mut params.key;
     let c = &mut params.colorize;
     CollapsingHeader::new("Colorize")
         .default_open(true)
         .show(ui, |ui| {
             ui.checkbox(&mut c.bypass, "Bypass (grayscale)");
-            // A new level count starts from evenly spaced thresholds.
+            // A new level count starts from evenly spaced thresholds, and levels that are
+            // gone stop being see-through.
             if ui
                 .add(Slider::new(&mut c.levels, ranges::LEVELS).text("levels"))
                 .changed()
             {
                 c.thresholds = even_thresholds(c.levels);
+                key.keep_levels(c.levels);
             }
             ui.horizontal(|ui| {
                 ui.label("Thresholds");

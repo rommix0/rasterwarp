@@ -370,6 +370,14 @@ impl WarpParams {
     }
 }
 
+impl KeyParams {
+    /// Clears the see-through bits of levels `levels` and up, which a colorizer with
+    /// `levels` levels doesn't have, so they don't come back when the count grows.
+    pub fn keep_levels(&mut self, levels: u32) {
+        self.levels &= ((1u16 << levels.min(8)) - 1) as u8;
+    }
+}
+
 /// sRGB-encoded channel to linear, for palette colors going to the GPU.
 pub fn srgb_to_linear(c: f32) -> f32 {
     if c <= 0.04045 {
@@ -437,6 +445,20 @@ mod tests {
         assert!(ranges::BEAM_WIDTH.contains(&p.raster.beam_width));
         assert!(ranges::COMPENSATION.contains(&p.raster.compensation));
         assert!(ranges::SPEED_COMPENSATION.contains(&p.raster.speed_compensation));
+    }
+
+    #[test]
+    fn keeping_levels_clears_the_hidden_see_through_bits() {
+        let mut key = KeyParams {
+            enabled: true,
+            levels: 0b1010_0101,
+        };
+        key.keep_levels(8);
+        assert_eq!(key.levels, 0b1010_0101, "all eight levels exist");
+        key.keep_levels(6);
+        assert_eq!(key.levels, 0b0010_0101);
+        key.keep_levels(2);
+        assert_eq!(key.levels, 0b01);
     }
 
     #[test]

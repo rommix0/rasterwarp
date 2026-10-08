@@ -94,7 +94,7 @@ impl ColorizePass {
 mod tests {
     use super::*;
     use crate::blend::FrameParams;
-    use crate::params::{KeyParams, Params};
+    use crate::params::Params;
 
     #[test]
     fn pipeline_matches_shader() {

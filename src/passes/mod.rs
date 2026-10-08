@@ -1,4 +1,5 @@
-//! The render pipeline: source -> warp -> colorize -> feedback -> bloom -> composite.
+//! The render pipeline: source -> warp or raster -> colorize -> feedback -> bloom ->
+//! composite.
 
 pub mod bloom;
 pub mod colorize;

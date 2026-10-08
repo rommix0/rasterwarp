@@ -6,7 +6,7 @@ use crate::blend::{MAX_SLOTS, OscSlot, WarpFrame};
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
 use crate::params::{Axis, OscInput, Waveform};
 
-/// Matches `struct Osc` in warp.wgsl.
+/// Matches `struct Osc` in deflection.wgsl.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct OscUniform {
