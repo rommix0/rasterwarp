@@ -14,6 +14,7 @@ pub mod params;
 pub mod passes;
 pub mod preview;
 pub mod rate;
+pub mod save;
 pub mod sequence;
 pub mod source;
 pub mod transition;

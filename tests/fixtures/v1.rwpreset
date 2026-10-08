@@ -1,0 +1,159 @@
+{
+  "format": "rasterwarp-preset",
+  "version": 1,
+  "params": {
+    "warp": {
+      "oscillators": [
+        {
+          "waveform": "square",
+          "target": "y",
+          "input": "time",
+          "frequency": 7.5,
+          "amplitude": 0.25,
+          "phase": 0.75,
+          "phase_speed": -1.5,
+          "lfo_rate": 3.0,
+          "lfo_depth": 0.6,
+          "sync": "frame",
+          "envelope": "swell"
+        },
+        {
+          "waveform": "square",
+          "target": "y",
+          "input": "time",
+          "frequency": 7.5,
+          "amplitude": 0.25,
+          "phase": 0.75,
+          "phase_speed": -1.5,
+          "lfo_rate": 3.0,
+          "lfo_depth": 0.6,
+          "sync": "frame",
+          "envelope": "swell"
+        },
+        {
+          "waveform": "square",
+          "target": "y",
+          "input": "time",
+          "frequency": 7.5,
+          "amplitude": 0.25,
+          "phase": 0.75,
+          "phase_speed": -1.5,
+          "lfo_rate": 3.0,
+          "lfo_depth": 0.6,
+          "sync": "frame",
+          "envelope": "swell"
+        },
+        {
+          "waveform": "square",
+          "target": "y",
+          "input": "time",
+          "frequency": 7.5,
+          "amplitude": 0.25,
+          "phase": 0.75,
+          "phase_speed": -1.5,
+          "lfo_rate": 3.0,
+          "lfo_depth": 0.6,
+          "sync": "frame",
+          "envelope": "swell"
+        }
+      ],
+      "zoom": 2.5,
+      "rotation": -1.0,
+      "offset": [
+        0.25,
+        -0.5
+      ],
+      "drift": 0.7,
+      "slave_4_to_3": true,
+      "line_jitter": 3.0,
+      "axis_wander": 0.4
+    },
+    "colorize": {
+      "levels": 4,
+      "softness": 0.3,
+      "palette": [
+        [
+          0.0,
+          0.5,
+          1.0
+        ],
+        [
+          0.125,
+          0.5,
+          0.875
+        ],
+        [
+          0.25,
+          0.5,
+          0.75
+        ],
+        [
+          0.375,
+          0.5,
+          0.625
+        ],
+        [
+          0.5,
+          0.5,
+          0.5
+        ],
+        [
+          0.625,
+          0.5,
+          0.375
+        ],
+        [
+          0.75,
+          0.5,
+          0.25
+        ],
+        [
+          0.875,
+          0.5,
+          0.125
+        ]
+      ],
+      "cycle_speed": 1.5,
+      "bypass": true,
+      "thresholds": [
+        0.2,
+        0.5,
+        0.7,
+        1.0,
+        1.0,
+        1.0,
+        1.0
+      ],
+      "bandwidth": 2.5,
+      "ringing": 0.6
+    },
+    "feedback": {
+      "amount": 0.5,
+      "zoom": 0.95,
+      "rotation": -0.05,
+      "offset": [
+        0.01,
+        -0.01
+      ]
+    },
+    "glow": {
+      "bloom_intensity": 2.0,
+      "bloom_threshold": 0.3,
+      "scanline_strength": 0.8,
+      "scanline_count": 700.0,
+      "chroma": 2.5,
+      "noise": 0.2
+    },
+    "raster": {
+      "enabled": true,
+      "lines": 800,
+      "beam_width": 2.0,
+      "compensation": 0.5,
+      "speed_compensation": 0.9
+    },
+    "key": {
+      "enabled": true,
+      "levels": 10
+    }
+  }
+}

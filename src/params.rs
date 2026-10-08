@@ -3,6 +3,10 @@
 use std::f32::consts::PI;
 use std::ops::RangeInclusive;
 
+use serde::{Deserialize, Serialize};
+
+use crate::save::saved_names;
+
 /// Slider ranges. The UI uses these, and tests check that defaults fall inside them.
 pub mod ranges {
     use super::*;
@@ -46,8 +50,9 @@ pub const PALETTE_SIZE: usize = 8;
 /// One threshold between each pair of neighbouring levels.
 pub const THRESHOLD_COUNT: usize = PALETTE_SIZE - 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Waveform {
+    #[default]
     Sine,
     Triangle,
     Ramp,
@@ -65,19 +70,31 @@ impl Waveform {
     ];
 }
 
+saved_names!(Waveform {
+    Sine => "sine",
+    Triangle => "triangle",
+    Ramp => "ramp",
+    Square => "square",
+    Noise => "noise",
+});
+
 /// Which displacement component an oscillator adds to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Axis {
+    #[default]
     X,
     Y,
 }
 
+saved_names!(Axis { X => "x", Y => "y" });
+
 /// What drives an oscillator's phase across the frame.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OscInput {
     /// Horizontal position.
     U,
     /// Vertical position: X displacement driven by V gives the classic per-scanline wiggle.
+    #[default]
     V,
     /// Distance from the frame center.
     Radius,
@@ -89,10 +106,18 @@ impl OscInput {
     pub const ALL: [OscInput; 4] = [OscInput::U, OscInput::V, OscInput::Radius, OscInput::Time];
 }
 
+saved_names!(OscInput {
+    U => "u",
+    V => "v",
+    Radius => "radius",
+    Time => "time",
+});
+
 /// How an oscillator's phase moves over time (the manual's sync modes).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OscSync {
     /// Phase advances at `phase_speed`: the wave drifts.
+    #[default]
     Free,
     /// Phase is locked to the frame: the wave stands still.
     Frame,
@@ -102,10 +127,16 @@ impl OscSync {
     pub const ALL: [OscSync; 2] = [OscSync::Free, OscSync::Frame];
 }
 
+saved_names!(OscSync {
+    Free => "free",
+    Frame => "frame",
+});
+
 /// How an oscillator's amplitude behaves while a transition or sequence ramp runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Envelope {
     /// Always at its set amplitude.
+    #[default]
     Constant,
     /// Silent at rest; swells to its amplitude in the middle of a ramp.
     Swell,
@@ -115,7 +146,13 @@ impl Envelope {
     pub const ALL: [Envelope; 2] = [Envelope::Constant, Envelope::Swell];
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+saved_names!(Envelope {
+    Constant => "constant",
+    Swell => "swell",
+});
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Oscillator {
     pub waveform: Waveform,
     pub target: Axis,
@@ -136,7 +173,8 @@ pub struct Oscillator {
     pub envelope: Envelope,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WarpParams {
     pub oscillators: [Oscillator; OSCILLATOR_COUNT],
     pub zoom: f32,
@@ -156,7 +194,8 @@ pub struct WarpParams {
     pub axis_wander: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ColorizeParams {
     pub levels: u32,
     pub softness: f32,
@@ -175,7 +214,8 @@ pub struct ColorizeParams {
 }
 
 /// True raster mode: draw the source as deflected scan lines instead of warping it.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RasterParams {
     pub enabled: bool,
     pub lines: u32,
@@ -188,14 +228,16 @@ pub struct RasterParams {
 }
 
 /// Level keying: chosen colorizer levels become see-through, showing a background image.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct KeyParams {
     pub enabled: bool,
     /// Bit i set: level i is see-through.
     pub levels: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct FeedbackParams {
     /// How much of the previous canvas frame survives each canvas frame (so trails
     /// decay at the program frame rate). 0 = no trails.
@@ -206,7 +248,8 @@ pub struct FeedbackParams {
     pub offset: [f32; 2],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct GlowParams {
     pub bloom_intensity: f32,
     pub bloom_threshold: f32,
@@ -217,7 +260,8 @@ pub struct GlowParams {
     pub noise: f32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Params {
     pub warp: WarpParams,
     pub colorize: ColorizeParams,
@@ -347,6 +391,114 @@ impl Default for Params {
     }
 }
 
+// Each part's default is the default look's part, so a file missing a field gets the
+// value a fresh session has.
+impl Default for WarpParams {
+    fn default() -> Self {
+        Params::default().warp
+    }
+}
+
+impl Default for ColorizeParams {
+    fn default() -> Self {
+        Params::default().colorize
+    }
+}
+
+impl Default for FeedbackParams {
+    fn default() -> Self {
+        Params::default().feedback
+    }
+}
+
+impl Default for GlowParams {
+    fn default() -> Self {
+        Params::default().glow
+    }
+}
+
+impl Default for RasterParams {
+    fn default() -> Self {
+        Params::default().raster
+    }
+}
+
+impl Default for KeyParams {
+    fn default() -> Self {
+        Params::default().key
+    }
+}
+
+fn clamp(value: &mut f32, range: RangeInclusive<f32>) {
+    *value = value.clamp(*range.start(), *range.end());
+}
+
+impl Params {
+    /// A copy with every value inside its slider range, for parameters read from a file.
+    pub fn clamped(mut self) -> Self {
+        let w = &mut self.warp;
+        for o in &mut w.oscillators {
+            clamp(&mut o.frequency, ranges::FREQUENCY);
+            clamp(&mut o.amplitude, ranges::AMPLITUDE);
+            clamp(&mut o.phase, ranges::PHASE);
+            clamp(&mut o.phase_speed, ranges::PHASE_SPEED);
+            clamp(&mut o.lfo_rate, ranges::LFO_RATE);
+            clamp(&mut o.lfo_depth, ranges::LFO_DEPTH);
+        }
+        clamp(&mut w.zoom, ranges::ZOOM);
+        clamp(&mut w.rotation, ranges::ROTATION);
+        for v in &mut w.offset {
+            clamp(v, ranges::OFFSET);
+        }
+        clamp(&mut w.drift, ranges::DRIFT);
+        clamp(&mut w.line_jitter, ranges::LINE_JITTER);
+        clamp(&mut w.axis_wander, ranges::AXIS_WANDER);
+
+        let c = &mut self.colorize;
+        c.levels = c
+            .levels
+            .clamp(*ranges::LEVELS.start(), *ranges::LEVELS.end());
+        clamp(&mut c.softness, ranges::SOFTNESS);
+        for v in c.palette.iter_mut().flatten() {
+            clamp(v, 0.0..=1.0);
+        }
+        clamp(&mut c.cycle_speed, ranges::CYCLE_SPEED);
+        for t in &mut c.thresholds {
+            clamp(t, ranges::THRESHOLD);
+        }
+        clamp(&mut c.bandwidth, ranges::BANDWIDTH);
+        clamp(&mut c.ringing, ranges::RINGING);
+
+        let f = &mut self.feedback;
+        clamp(&mut f.amount, ranges::FEEDBACK_AMOUNT);
+        clamp(&mut f.zoom, ranges::FEEDBACK_ZOOM);
+        clamp(&mut f.rotation, ranges::FEEDBACK_ROTATION);
+        for v in &mut f.offset {
+            clamp(v, ranges::FEEDBACK_OFFSET);
+        }
+
+        let g = &mut self.glow;
+        clamp(&mut g.bloom_intensity, ranges::BLOOM_INTENSITY);
+        clamp(&mut g.bloom_threshold, ranges::BLOOM_THRESHOLD);
+        clamp(&mut g.scanline_strength, ranges::SCANLINE_STRENGTH);
+        clamp(&mut g.scanline_count, ranges::SCANLINE_COUNT);
+        clamp(&mut g.chroma, ranges::CHROMA);
+        clamp(&mut g.noise, ranges::NOISE);
+
+        let r = &mut self.raster;
+        r.lines = r
+            .lines
+            .clamp(*ranges::RASTER_LINES.start(), *ranges::RASTER_LINES.end());
+        clamp(&mut r.beam_width, ranges::BEAM_WIDTH);
+        clamp(&mut r.compensation, ranges::COMPENSATION);
+        clamp(&mut r.speed_compensation, ranges::SPEED_COMPENSATION);
+
+        // Levels the colorizer doesn't have can't be see-through.
+        self.key.keep_levels(self.colorize.levels);
+        self
+    }
+}
+
 impl WarpParams {
     /// The oscillators as they actually run, with oscillator 4 resolved when it is
     /// slaved to oscillator 3. Each entry also names the phase clock it uses.
@@ -445,6 +597,29 @@ mod tests {
         assert!(ranges::BEAM_WIDTH.contains(&p.raster.beam_width));
         assert!(ranges::COMPENSATION.contains(&p.raster.compensation));
         assert!(ranges::SPEED_COMPENSATION.contains(&p.raster.speed_compensation));
+    }
+
+    #[test]
+    fn clamping_moves_values_into_their_ranges() {
+        assert_eq!(Params::default().clamped(), Params::default());
+        let mut p = Params::default();
+        p.warp.zoom = 99.0;
+        p.warp.oscillators[2].frequency = -5.0;
+        p.colorize.levels = 50;
+        p.colorize.palette[3][1] = 2.0;
+        p.raster.lines = 5;
+        p.key.levels = 0xff;
+        let p = p.clamped();
+        assert_eq!(p.warp.zoom, 4.0);
+        assert_eq!(p.warp.oscillators[2].frequency, 0.0);
+        assert_eq!(p.colorize.levels, 8);
+        assert_eq!(p.colorize.palette[3][1], 1.0);
+        assert_eq!(p.raster.lines, 100);
+        assert_eq!(p.key.levels, 0xff, "all eight levels exist");
+        let mut few = Params::default();
+        few.colorize.levels = 3;
+        few.key.levels = 0xff;
+        assert_eq!(few.clamped().key.levels, 0b111);
     }
 
     #[test]
