@@ -1,7 +1,7 @@
 # Rasterwarp: Save and Load: Design
 
 Date: 2026-10-07
-Status: Approved 2026-10-07 (design reviewed section by section in chat)
+Status: Approved 2026-10-07 (design reviewed section by section in chat); refined 2026-10-07 while building the implementation plan
 Builds on: `docs/superpowers/specs/2026-10-07-rasterwarp-motion-output-look-design.md` (Plans 1–3, now on `main`), which listed "persisting curves, cues and presets to disk" under Later.
 
 ## Goals
@@ -38,7 +38,7 @@ Builds on: `docs/superpowers/specs/2026-10-07-rasterwarp-motion-output-look-desi
 - `transition`: both banks' `Params`, which bank is on air, the transition duration and its curve.
 - `sequence` (if one exists): its cues (each with `params`, start frame, ramp length in frames and curve), the selected cue and the loop setting.
 - `curves`: the user curves (id, name and points), at most `curve::MAX_CUSTOM` (8).
-- `canvas`: the canvas preset choice and custom size; `frame_rate`: the program frame rate.
+- `canvas`: the canvas size `[width, height]` (the preset choice follows from it); `frame_rate`: the program frame rate (one not in the panel's list reads as 60 fps).
 - `source`: the source image path, or none for the built-in test card. `background`: the background image path, or none.
 
 **Not saved (state in motion):** transition progress, the sequence's running state and position, oscillator clocks and phases, the animation frame count, and the trails. An opened project starts at rest: no transition running, the sequence stopped on its selected cue, trails cleared.
@@ -58,19 +58,19 @@ Save preset saves the same look that Load would replace.
 
 ## The panel
 
-**Project row** (under the header's Pause / Show preview line; replaces "Reset all"):
-- **Open project…**, **Save project**, **Save as…**, **New**.
-- The header shows `Project: <name>` with ` •` appended while there are unsaved changes, or `Project: Untitled`.
-- **Save project** on an Untitled session behaves like Save as… (a save dialog filtered to `.rwproject`).
-- **New** resets everything to defaults (what "Reset all" did) and makes the session Untitled.
+**Project row** (under the header's Pause / Show preview / Reset all line):
+- **Open project…**, **Save project**, **Save as…**, **New**. Open project… and New are disabled while recording, because the canvas can't change then.
+- The row shows `Project: <name>` with ` •` appended while there are unsaved changes, or `Project: Untitled`.
+- **Save project** on an Untitled session behaves like Save as… (a save dialog filtered to `.rwproject`; the extension is added if missing).
+- **New** resets the whole session to defaults and makes it Untitled. "Reset all" stays as it is: it resets only the look being edited.
 - Keyboard: Ctrl+S Save project, Ctrl+Shift+S Save as…, Ctrl+O Open project…. These fire only when no text field has keyboard focus.
-- **Unsaved changes:** Open project, New, and dropping a project file first check for unsaved changes. If there are any, a system message dialog (`rfd::MessageDialog`) asks "Save changes to <name>?" with Save / Don't save / Cancel. Save on an Untitled session goes through Save as…; cancelling that dialog cancels the whole action. Quitting never asks, because the autosave keeps the session.
-- **Unsaved changes are detected** by comparing a snapshot of the current project (the project file's contents, in memory) with the snapshot last saved or opened. No dirty flags.
+- **Unsaved changes:** Open project, New, and dropping a project file first check for unsaved changes. If there are any, a system message dialog (`rfd::MessageDialog`) asks "Save changes to <name>?" with the system's Yes / No / Cancel buttons: Yes saves, No discards, Cancel does nothing. (Custom button labels need a Windows manifest feature the app doesn't have.) Save on an Untitled session goes through Save as…; cancelling that dialog cancels the whole action. Quitting never asks, because the autosave keeps the session.
+- **Unsaved changes are detected** by comparing a snapshot of the current project (the project file's contents, in memory) with the snapshot last saved or opened. No dirty flags. Panel widgets therefore must not change a value just by drawing it: the palette color buttons edit a copy and write it back only when changed, and the threshold sliders show 3 decimals without rounding the value.
 
 **Presets section** (collapsible, directly above Curves):
 - A name text box and a **Save preset** button. Saving to a name that already exists asks "Replace preset <name>?" (Yes / No) first.
 - The presets in the folder, as a list of names sorted case-insensitively. Clicking a name loads it (see "Where presets load and save").
-- Right-click on a name: **Rename** (inline text box; Enter confirms, Escape cancels; an existing name is refused with a message) and **Delete** ("Delete preset <name>?" Yes / No).
+- Right-click on a name: **Rename** (inline text box; Enter confirms, Escape or clicking elsewhere cancels; an existing name is refused with a message) and **Delete** ("Delete preset <name>?" Yes / No).
 - "Folder: <folder> — **Choose…**", like the captures folder. The default is `presets`, a relative path next to the default `captures`.
 - Preset names must be non-empty after trimming and contain none of `\ / : * ? " < > |`; the Save button is disabled with a hint otherwise.
 - The list is rescanned when the section is opened, after any save, rename or delete, and when the folder changes. A missing folder lists nothing; saving creates it.
@@ -81,7 +81,8 @@ Save preset saves the same look that Load would replace.
 
 - **Location:** `%APPDATA%\rasterwarp\` (from the `APPDATA` environment variable; if it isn't set, a `rasterwarp-data` folder in the current working directory). It holds `autosave.rwproject` and `settings.json`, created on first write.
 - **What the autosave holds:** the current project snapshot, plus the named project path it belongs to (if any) and whether it had unsaved changes. After a relaunch the header shows the same `Project: <name> •`, and Save project writes to that named file.
-- **When it's written:** when the window closes, and every 60 seconds of wall time if the snapshot changed since the last autosave. Settings are written when they change and on close.
+- **When it's written:** when the window closes, and every 60 seconds of wall time if it changed since the last autosave (the snapshot, the project file it belongs to, or the unsaved flag). Settings are written at the same times when they changed, so dragging a value doesn't write a file per frame.
+- **The autosave is a project file** with two extra fields, `file` and `unsaved`, so it can also be opened as a project.
 - **Restore on launch:** if `autosave.rwproject` exists, it is restored, at rest. An image path on the command line still overrides the restored source image. If the autosave can't be read, the app starts fresh with defaults, renames the file to `autosave.bad.rwproject` (replacing any older one), and shows a one-line error in the panel.
 
 ## Error handling
@@ -113,7 +114,7 @@ Save preset saves the same look that Load would replace.
 - Presets folder (in a temporary directory): list sorted case-insensitively; save, rename (including refusing an existing name) and delete; name validation.
 - Safe write: the target has the new contents and no `.tmp` file remains.
 
-**Compatibility guard:** `tests/fixtures/v1.rwpreset` and `tests/fixtures/v1.rwproject`, written by this version and checked in. A test loads both and checks key values. These files are never regenerated; they must keep loading in every later version.
+**Compatibility guard:** `tests/fixtures/v1.rwpreset` (a complete preset written by this version) and `tests/fixtures/v1.rwproject` (a compact hand-written version-1 project listing only non-default values, so it also exercises the missing-fields rule; a complete one is about 670 lines). A test loads each and checks key values. These files are never regenerated; they must keep loading in every later version.
 
 **Manual check (release build):**
 - Save a preset and load it in each of Live, Transition (into the off-air bank) and Sequence (into the selected cue).
