@@ -609,6 +609,81 @@ fn keyed_levels_show_the_background() {
     assert_eq!(px(200), [255, 255, 255], "the white level stays");
 }
 
+#[test]
+fn keyed_levels_show_the_background_after_clearing_trails() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (256, 64);
+    // Black on the left half, white on the right.
+    let image = GrayImage {
+        width: size.0,
+        height: size.1,
+        pixels: (0..size.0 * size.1)
+            .map(|i| if i % size.0 < size.0 / 2 { 0 } else { 255 })
+            .collect(),
+    };
+    let red = ColorImage {
+        width: 2,
+        height: 2,
+        pixels: [255, 0, 0, 255].repeat(4),
+    };
+    let mut params = flat_params();
+    params.colorize.levels = 2;
+    params.colorize.palette[0] = [0.0, 0.0, 1.0];
+    params.colorize.palette[1] = [1.0, 1.0, 1.0];
+    params.key.enabled = true;
+    params.key.levels = 0b01; // the dark level is see-through
+
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "keyed", size.0, size.1, format);
+    let mut renderer = Renderer::new(&device, &queue, format, size, &image);
+    renderer.set_background(&device, &queue, Some(&red));
+
+    // Render first frame
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &FrameParams::at_rest(&params),
+        0.0,
+        &output.view,
+        size,
+    );
+    queue.submit([encoder.finish()]);
+
+    // Clear trails
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.clear_feedback(&mut encoder);
+    queue.submit([encoder.finish()]);
+
+    // Render second frame after clearing
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &FrameParams::at_rest(&params),
+        0.1,
+        &output.view,
+        size,
+    );
+    queue.submit([encoder.finish()]);
+
+    let pixels = read_back(&device, &queue, &output.texture);
+    let px = |x: u32| {
+        let i = ((size.1 / 2 * size.0 + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    assert_eq!(
+        px(40),
+        [255, 0, 0],
+        "the keyed dark level still shows the red background after clearing trails"
+    );
+    assert_eq!(px(200), [255, 255, 255], "the white level stays");
+}
+
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
 /// that buffer copies require.
 fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {

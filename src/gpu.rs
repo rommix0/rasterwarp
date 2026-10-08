@@ -101,7 +101,7 @@ impl RenderTarget {
     }
 }
 
-/// Clears `view` to black.
+/// Clears `view` to transparent.
 pub fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
     encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("clear"),
@@ -110,7 +110,7 @@ pub fn clear(encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 store: wgpu::StoreOp::Store,
             },
         })],
