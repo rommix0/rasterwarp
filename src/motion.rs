@@ -5,12 +5,14 @@ use crate::blend::{Clocks, FrameParams, advance_ramp, blend};
 use crate::curve::CurveLibrary;
 use crate::params::Params;
 use crate::rate::TICKS_PER_SECOND;
+use crate::save::saved_names;
 use crate::sequence::{SeqEvent, SeqView, Sequence};
 use crate::transition::{AbEvent, AbState};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
     /// The panel edits what's on screen.
+    #[default]
     Live,
     /// A/B banks: the panel edits the off-air bank; Transition ramps to it.
     Transition,
@@ -21,6 +23,12 @@ pub enum Mode {
 impl Mode {
     pub const ALL: [Mode; 3] = [Mode::Live, Mode::Transition, Mode::Sequence];
 }
+
+saved_names!(Mode {
+    Live => "live",
+    Transition => "transition",
+    Sequence => "sequence",
+});
 
 /// What the off-air preview is showing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,6 +86,25 @@ impl Motion {
             preview_shown: None,
             frames: 0,
             jumped: false,
+        }
+    }
+
+    /// Motion restored from a project, at rest: no ramp running, the sequence stopped,
+    /// and phases starting over.
+    pub fn restored(
+        mode: Mode,
+        ab: AbState,
+        sequence: Option<Sequence>,
+        curves: CurveLibrary,
+    ) -> Self {
+        Self {
+            mode,
+            ab,
+            sequence,
+            curves,
+            // The picture jumps to the project's look.
+            jumped: true,
+            ..Self::new(Params::default())
         }
     }
 

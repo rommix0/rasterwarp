@@ -16,6 +16,7 @@ pub mod preview;
 pub mod rate;
 pub mod save;
 pub mod sequence;
+pub mod session;
 pub mod source;
 pub mod transition;
 pub mod ui;

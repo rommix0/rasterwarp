@@ -2,6 +2,8 @@
 
 use std::ops::RangeInclusive;
 
+use serde::{Deserialize, Serialize};
+
 /// Allowed y range for user curve points (overshoot and anticipation).
 pub const Y_RANGE: RangeInclusive<f32> = -0.5..=1.5;
 /// Minimum x gap kept between neighbouring points.
@@ -18,8 +20,34 @@ pub enum CurveRef {
     Custom(u32),
 }
 
+impl Serialize for CurveRef {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            CurveRef::Linear => s.serialize_str("linear"),
+            CurveRef::SCurve => s.serialize_str("s-curve"),
+            CurveRef::Custom(id) => s.serialize_str(&format!("custom:{id}")),
+        }
+    }
+}
+
+/// An unknown curve name reads as Linear.
+impl<'de> Deserialize<'de> for CurveRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let name = value.as_str().unwrap_or("");
+        Ok(match name {
+            "s-curve" => CurveRef::SCurve,
+            _ => name
+                .strip_prefix("custom:")
+                .and_then(|id| id.parse().ok())
+                .map_or(CurveRef::Linear, CurveRef::Custom),
+        })
+    }
+}
+
 /// A user-drawn curve through (0,0), its interior points, and (1,1).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CustomCurve {
     pub id: u32,
     pub name: String,
@@ -34,6 +62,22 @@ impl CustomCurve {
             name,
             points: vec![[0.5, 0.5]],
         }
+    }
+
+    /// A copy of a curve read from a file, keeping only the points `insert` would accept.
+    pub fn checked(&self) -> Self {
+        let mut curve = Self {
+            id: self.id,
+            name: self.name.clone(),
+            points: Vec::new(),
+        };
+        if curve.name.trim().is_empty() {
+            curve.name = format!("Curve {}", self.id + 1);
+        }
+        for &[x, y] in &self.points {
+            curve.insert(x, y);
+        }
+        curve
     }
 
     pub fn points(&self) -> &[[f32; 2]] {
@@ -100,6 +144,27 @@ pub struct CurveLibrary {
 }
 
 impl CurveLibrary {
+    /// A library holding `curves` (from a file): at most [`MAX_CUSTOM`], each id once,
+    /// each curve checked.
+    pub fn from_curves(curves: &[CustomCurve]) -> Self {
+        let mut library = Self::default();
+        for curve in curves {
+            if library.custom.len() < MAX_CUSTOM && library.get(curve.id).is_none() {
+                library.custom.push(curve.checked());
+            }
+        }
+        library.next_id = library.custom.iter().map(|c| c.id + 1).max().unwrap_or(0);
+        library
+    }
+
+    /// `curve`, or Linear if it names a user curve that isn't in the library.
+    pub fn resolve(&self, curve: CurveRef) -> CurveRef {
+        match curve {
+            CurveRef::Custom(id) if self.get(id).is_none() => CurveRef::Linear,
+            _ => curve,
+        }
+    }
+
     /// Adds a new user curve. Returns its id, or `None` when the library is full.
     pub fn add(&mut self) -> Option<u32> {
         if self.custom.len() >= MAX_CUSTOM {

@@ -1,6 +1,8 @@
 //! Sequence mode: up to 5 cues, each ramping in at its own start frame
 //! (the Animation Aid's sequence ramps with frame-count thumbwheels).
 
+use serde::{Deserialize, Serialize};
+
 use crate::curve::CurveRef;
 use crate::params::Params;
 use crate::rate::TICKS_PER_SECOND;
@@ -19,12 +21,24 @@ fn frame_ticks(frame: u32) -> i64 {
     i64::from(frame) * TICKS_PER_FRAME
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Cue {
     pub params: Params,
     pub start_frame: u32,
     pub duration_frames: u32,
     pub curve: CurveRef,
+}
+
+impl Default for Cue {
+    fn default() -> Self {
+        Self {
+            params: Params::default(),
+            start_frame: 0,
+            duration_frames: 48,
+            curve: CurveRef::SCurve,
+        }
+    }
 }
 
 /// What happened during one `advance`.
@@ -70,9 +84,7 @@ impl Sequence {
         Self {
             cues: vec![Cue {
                 params,
-                start_frame: 0,
-                duration_frames: 48,
-                curve: CurveRef::SCurve,
+                ..Cue::default()
             }],
             selected: 0,
             looping: false,
@@ -80,6 +92,35 @@ impl Sequence {
             clock: 0,
             base: 0,
             target: None,
+        }
+    }
+
+    /// A stopped sequence of `cues` (from a file), repaired to the rules the panel keeps:
+    /// 1 to [`MAX_CUES`] cues, cue 1 at frame 0, start frames rising and at most
+    /// [`MAX_FRAME`], ramps 1 to [`MAX_FRAME`] frames, parameters in range.
+    pub fn from_cues(cues: &[Cue], selected: usize, looping: bool) -> Self {
+        let mut kept: Vec<Cue> = Vec::new();
+        for cue in cues.iter().take(MAX_CUES) {
+            let start = match kept.last() {
+                None => 0,
+                Some(prev) if prev.start_frame >= MAX_FRAME => break,
+                Some(prev) => cue.start_frame.clamp(prev.start_frame + 1, MAX_FRAME),
+            };
+            kept.push(Cue {
+                params: cue.params.clamped(),
+                start_frame: start,
+                duration_frames: cue.duration_frames.clamp(1, MAX_FRAME),
+                curve: cue.curve,
+            });
+        }
+        if kept.is_empty() {
+            kept.push(Cue::default());
+        }
+        Self {
+            selected: selected.min(kept.len() - 1),
+            looping,
+            cues: kept,
+            ..Self::new(Params::default())
         }
     }
 

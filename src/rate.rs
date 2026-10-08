@@ -6,7 +6,8 @@
 pub const TICKS_PER_SECOND: i64 = 120_000;
 
 /// A frame rate as an exact fraction, `num / den` frames per second.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct FrameRate {
     pub num: i32,
     pub den: i32,
