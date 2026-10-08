@@ -346,6 +346,16 @@ fn flat_params() -> Params {
     p
 }
 
+/// Setup result for keying tests.
+struct KeyingSetup {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    renderer: Renderer,
+    output: gpu::RenderTarget,
+    params: Params,
+    size: (u32, u32),
+}
+
 /// A left-to-right gradient from black to white.
 fn gradient(width: u32, height: u32) -> GrayImage {
     let row: Vec<u8> = (0..width)
@@ -555,11 +565,9 @@ fn raster_mode_draws_separate_scan_lines() {
     );
 }
 
-#[test]
-fn keyed_levels_show_the_background() {
-    let Some((device, queue)) = device() else {
-        return;
-    };
+/// Sets up a keying test: striped grayscale image, red background, keying params.
+fn setup_keying_test() -> Option<KeyingSetup> {
+    let (device, queue) = device()?;
     let size = (256, 64);
     // Black on the left half, white on the right.
     let image = GrayImage {
@@ -585,6 +593,30 @@ fn keyed_levels_show_the_background() {
     let output = gpu::RenderTarget::new(&device, "keyed", size.0, size.1, format);
     let mut renderer = Renderer::new(&device, &queue, format, size, &image);
     renderer.set_background(&device, &queue, Some(&red));
+
+    Some(KeyingSetup {
+        device,
+        queue,
+        renderer,
+        output,
+        params,
+        size,
+    })
+}
+
+#[test]
+fn keyed_levels_show_the_background() {
+    let Some(KeyingSetup {
+        device,
+        queue,
+        mut renderer,
+        output,
+        params,
+        size,
+    }) = setup_keying_test()
+    else {
+        return;
+    };
     let mut encoder = device.create_command_encoder(&Default::default());
     renderer.render(
         &device,
@@ -611,34 +643,19 @@ fn keyed_levels_show_the_background() {
 
 #[test]
 fn keyed_levels_show_the_background_after_clearing_trails() {
-    let Some((device, queue)) = device() else {
+    let Some(KeyingSetup {
+        device,
+        queue,
+        mut renderer,
+        output,
+        mut params,
+        size,
+    }) = setup_keying_test()
+    else {
         return;
     };
-    let size = (256, 64);
-    // Black on the left half, white on the right.
-    let image = GrayImage {
-        width: size.0,
-        height: size.1,
-        pixels: (0..size.0 * size.1)
-            .map(|i| if i % size.0 < size.0 / 2 { 0 } else { 255 })
-            .collect(),
-    };
-    let red = ColorImage {
-        width: 2,
-        height: 2,
-        pixels: [255, 0, 0, 255].repeat(4),
-    };
-    let mut params = flat_params();
-    params.colorize.levels = 2;
-    params.colorize.palette[0] = [0.0, 0.0, 1.0];
-    params.colorize.palette[1] = [1.0, 1.0, 1.0];
-    params.key.enabled = true;
-    params.key.levels = 0b01; // the dark level is see-through
-
-    let format = wgpu::TextureFormat::Rgba8Unorm;
-    let output = gpu::RenderTarget::new(&device, "keyed", size.0, size.1, format);
-    let mut renderer = Renderer::new(&device, &queue, format, size, &image);
-    renderer.set_background(&device, &queue, Some(&red));
+    // Enable feedback so the cleared trails feed into the next frame
+    params.feedback.amount = 0.9;
 
     // Render first frame
     let mut encoder = device.create_command_encoder(&Default::default());
