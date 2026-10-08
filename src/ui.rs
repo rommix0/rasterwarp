@@ -11,7 +11,9 @@ use crate::capture::recorder::{RecordSettings, RecordStatus};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::motion::{Mode, Motion};
-use crate::params::{Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, ranges};
+use crate::params::{
+    Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, even_thresholds, ranges,
+};
 use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
 use crate::transition::{AbState, DURATION};
@@ -523,7 +525,35 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
         .default_open(true)
         .show(ui, |ui| {
             ui.checkbox(&mut c.bypass, "Bypass (grayscale)");
-            ui.add(Slider::new(&mut c.levels, ranges::LEVELS).text("levels"));
+            // A new level count starts from evenly spaced thresholds.
+            if ui
+                .add(Slider::new(&mut c.levels, ranges::LEVELS).text("levels"))
+                .changed()
+            {
+                c.thresholds = even_thresholds(c.levels);
+            }
+            ui.horizontal(|ui| {
+                ui.label("Thresholds");
+                if ui.button("Even").clicked() {
+                    c.thresholds = even_thresholds(c.levels);
+                }
+            });
+            let used = c.levels as usize - 1;
+            for k in 0..used {
+                let slider = Slider::new(&mut c.thresholds[k], ranges::THRESHOLD)
+                    .max_decimals(3)
+                    .text(format!("level {} from", k + 2));
+                if ui.add(slider).changed() {
+                    // A threshold can't pass its neighbours.
+                    let lo = if k == 0 { 0.0 } else { c.thresholds[k - 1] };
+                    let hi = if k + 1 < used {
+                        c.thresholds[k + 1]
+                    } else {
+                        1.0
+                    };
+                    c.thresholds[k] = c.thresholds[k].clamp(lo, hi);
+                }
+            }
             ui.add(Slider::new(&mut c.softness, ranges::SOFTNESS).text("softness"));
             ui.add(Slider::new(&mut c.cycle_speed, ranges::CYCLE_SPEED).text("cycle speed"));
             ui.horizontal_wrapped(|ui| {

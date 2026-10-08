@@ -4,7 +4,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::blend::ColorizeFrame;
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
-use crate::params::PALETTE_SIZE;
+use crate::params::{PALETTE_SIZE, THRESHOLD_COUNT};
 
 /// Matches `struct Colorize` in colorize.wgsl.
 #[repr(C)]
@@ -12,6 +12,7 @@ use crate::params::PALETTE_SIZE;
 pub struct ColorizeUniforms {
     pub settings: [f32; 4],
     pub palette: [[f32; 4]; PALETTE_SIZE],
+    pub thresholds: [[f32; 4]; 2],
 }
 
 pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
@@ -23,8 +24,13 @@ pub fn uniforms(c: &ColorizeFrame) -> ColorizeUniforms {
             if c.bypass { 1.0 } else { 0.0 },
         ],
         palette: c.palette_linear.map(|[r, g, b]| [r, g, b, 1.0]),
+        thresholds: std::array::from_fn(|row| {
+            std::array::from_fn(|col| c.thresholds.get(row * 4 + col).copied().unwrap_or(1.0))
+        }),
     }
 }
+
+const _: () = assert!(THRESHOLD_COUNT <= 8, "thresholds fit in two vec4s");
 
 pub struct ColorizePass {
     pass: FullscreenPass,
@@ -87,8 +93,8 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // vec4 settings + array<vec4, 8> = 16 + 128 bytes.
-        assert_eq!(size_of::<ColorizeUniforms>(), 144);
+        // vec4 settings + array<vec4, 8> palette + array<vec4, 2> thresholds.
+        assert_eq!(size_of::<ColorizeUniforms>(), 176);
     }
 
     #[test]
@@ -97,8 +103,10 @@ mod tests {
         frame.cycle = 2.5;
         frame.bypass = true;
         frame.palette_linear[1] = [0.25, 0.5, 0.75];
+        frame.thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
         let u = uniforms(&frame);
         assert_eq!(u.settings, [6.0, frame.softness, 2.5, 1.0]);
         assert_eq!(u.palette[1], [0.25, 0.5, 0.75, 1.0]);
+        assert_eq!(u.thresholds, [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 1.0]]);
     }
 }

@@ -11,7 +11,7 @@ use rasterwarp::params::Params;
 use rasterwarp::passes::Renderer;
 use rasterwarp::preview::PreviewView;
 use rasterwarp::rate::FrameRate;
-use rasterwarp::source::test_card;
+use rasterwarp::source::{GrayImage, test_card};
 
 const OUT_W: u32 = 320;
 const OUT_H: u32 = 180;
@@ -328,6 +328,89 @@ fn real_time_capture_waits_for_the_gpu_when_the_ring_is_full() {
     }
     let status = recorder.finish(&device).expect("finish recording");
     assert_eq!((status.frames, status.dropped), (5, 0));
+}
+
+/// Parameters that show the source as it is: no deflection, trails or CRT effects.
+fn flat_params() -> Params {
+    let mut p = Params::default();
+    for osc in &mut p.warp.oscillators {
+        osc.amplitude = 0.0;
+    }
+    p.warp.drift = 0.0;
+    p.colorize.bandwidth = 0.0;
+    p.feedback.amount = 0.0;
+    p.glow.bloom_intensity = 0.0;
+    p.glow.scanline_strength = 0.0;
+    p.glow.chroma = 0.0;
+    p.glow.noise = 0.0;
+    p
+}
+
+/// A left-to-right gradient from black to white.
+fn gradient(width: u32, height: u32) -> GrayImage {
+    let row: Vec<u8> = (0..width)
+        .map(|x| (x as f32 / (width - 1) as f32 * 255.0).round() as u8)
+        .collect();
+    GrayImage {
+        width,
+        height,
+        pixels: row.repeat(height as usize),
+    }
+}
+
+/// Renders one canvas frame of `image` with `params` at `size`, and reads back the
+/// composite (RGBA, no letterboxing).
+fn render_still(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    params: &Params,
+    image: &GrayImage,
+    size: (u32, u32),
+) -> Vec<u8> {
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(device, "still", size.0, size.1, format);
+    let mut renderer = Renderer::new(device, queue, format, size, image);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render(
+        device,
+        queue,
+        &mut encoder,
+        &FrameParams::at_rest(params),
+        0.0,
+        &output.view,
+        size,
+    );
+    queue.submit([encoder.finish()]);
+    read_back(device, queue, &output.texture)
+}
+
+/// The first x in row `y` whose red channel is above half brightness.
+fn first_bright(pixels: &[u8], width: u32, y: u32) -> Option<u32> {
+    (0..width).find(|&x| pixels[((y * width + x) * 4) as usize] > 128)
+}
+
+#[test]
+fn colorizer_levels_start_at_their_thresholds() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (256, 64);
+    let mut params = flat_params();
+    params.colorize.levels = 2;
+    params.colorize.softness = 0.0;
+    params.colorize.palette[0] = [0.0, 0.0, 0.0];
+    params.colorize.palette[1] = [1.0, 1.0, 1.0];
+    let image = gradient(size.0, size.1);
+    for threshold in [0.25, 0.75] {
+        params.colorize.thresholds[0] = threshold;
+        let pixels = render_still(&device, &queue, &params, &image, size);
+        let edge = first_bright(&pixels, size.0, size.1 / 2).expect("a white level") as f32;
+        let expected = threshold * (size.0 - 1) as f32;
+        assert!(
+            (edge - expected).abs() <= 2.0,
+            "threshold {threshold}: white starts at x = {edge}, expected about {expected}"
+        );
+    }
 }
 
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
