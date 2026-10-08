@@ -72,7 +72,7 @@ impl CustomCurve {
             points: Vec::new(),
         };
         if curve.name.trim().is_empty() {
-            curve.name = format!("Curve {}", self.id + 1);
+            curve.name = format!("Curve {}", self.id.saturating_add(1));
         }
         for &[x, y] in &self.points {
             curve.insert(x, y);
@@ -153,7 +153,12 @@ impl CurveLibrary {
                 library.custom.push(curve.checked());
             }
         }
-        library.next_id = library.custom.iter().map(|c| c.id + 1).max().unwrap_or(0);
+        library.next_id = library
+            .custom
+            .iter()
+            .map(|c| c.id.saturating_add(1))
+            .max()
+            .unwrap_or(0);
         library
     }
 
@@ -167,13 +172,15 @@ impl CurveLibrary {
 
     /// Adds a new user curve. Returns its id, or `None` when the library is full.
     pub fn add(&mut self) -> Option<u32> {
-        if self.custom.len() >= MAX_CUSTOM {
+        if self.custom.len() >= MAX_CUSTOM || self.next_id == u32::MAX {
             return None;
         }
         let id = self.next_id;
         self.next_id += 1;
-        self.custom
-            .push(CustomCurve::new(id, format!("Curve {}", id + 1)));
+        self.custom.push(CustomCurve::new(
+            id,
+            format!("Curve {}", id.saturating_add(1)),
+        ));
         Some(id)
     }
 
@@ -356,5 +363,23 @@ mod tests {
             assert!(lib.add().is_some());
         }
         assert!(lib.add().is_none());
+    }
+
+    #[test]
+    fn huge_curve_ids_do_not_overflow() {
+        let huge_curve = CustomCurve::new(u32::MAX, "Huge".into());
+        let checked = huge_curve.checked();
+        assert_eq!(checked.id, u32::MAX);
+        // Name should not panic on saturating_add
+        assert!(!checked.name.is_empty());
+
+        let lib = CurveLibrary::from_curves(std::slice::from_ref(&huge_curve));
+        assert_eq!(lib.custom.len(), 1);
+        assert_eq!(lib.custom[0].id, u32::MAX);
+
+        // Cannot add more curves when next_id would be u32::MAX
+        let mut lib = CurveLibrary::from_curves(&[huge_curve]);
+        assert!(lib.add().is_none(), "cannot add when next_id == u32::MAX");
+        assert_eq!(lib.custom.len(), 1, "library still holds the huge curve");
     }
 }
