@@ -32,6 +32,11 @@ pub struct UiState {
     pub late: u64,
     pub source_info: String,
     pub load_error: Option<String>,
+    /// A project, preset or autosave problem.
+    pub file_error: Option<String>,
+    /// News about the last file opened (e.g. that a newer version wrote it).
+    pub file_note: Option<String>,
+    pub presets_folder: PathBuf,
     /// The keying background's description, if one is loaded.
     pub background_info: Option<String>,
     /// The user curve open in the curve editor.
@@ -41,7 +46,7 @@ pub struct UiState {
 }
 
 /// The capture controls and what the current or last recording reported.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CaptureUi {
     pub settings: RecordSettings,
     /// Progress while recording.
@@ -49,22 +54,6 @@ pub struct CaptureUi {
     /// What the last recording saved.
     pub saved: Option<String>,
     pub error: Option<String>,
-}
-
-impl Default for CaptureUi {
-    fn default() -> Self {
-        Self {
-            settings: RecordSettings {
-                format: VideoFormat::Hevc,
-                mode: CaptureMode::RealTime,
-                folder: PathBuf::from("captures"),
-                stop_after: 0.0,
-            },
-            status: None,
-            saved: None,
-            error: None,
-        }
-    }
 }
 
 /// The off-air preview as the panel shows it.
@@ -113,6 +102,12 @@ pub fn draw(
                 ui.label(&state.source_info);
                 if let Some(err) = &state.load_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
+                }
+                if let Some(err) = &state.file_error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                }
+                if let Some(note) = &state.file_note {
+                    ui.label(note);
                 }
                 ui.label("Drop a PNG/JPG onto the window to load it.");
                 ui.horizontal(|ui| {

@@ -164,6 +164,55 @@ impl Project {
     }
 }
 
+pub const AUTOSAVE_FILE: &str = "autosave.rwproject";
+/// Where an autosave that couldn't be read is kept.
+pub const BAD_AUTOSAVE_FILE: &str = "autosave.bad.rwproject";
+
+/// The session as the app last left it. It's a project file with two more fields, so it
+/// can also be opened as a project.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Autosave {
+    /// The named project file the session belongs to, if any.
+    pub file: Option<PathBuf>,
+    /// The session had changes that weren't saved to `file`.
+    pub unsaved: bool,
+    #[serde(flatten)]
+    pub project: Project,
+}
+
+pub fn save_autosave(dir: &Path, autosave: &Autosave) -> Result<()> {
+    save::write_atomic(
+        &dir.join(AUTOSAVE_FILE),
+        &save::to_json(PROJECT_FORMAT, autosave),
+    )
+}
+
+/// The autosave in `dir`, if there is one. One that can't be read is renamed to
+/// [`BAD_AUTOSAVE_FILE`] (replacing an older one) so the next autosave doesn't
+/// overwrite it, and the error says why.
+pub fn restore_autosave(dir: &Path) -> Result<Option<Loaded<Autosave>>> {
+    let path = dir.join(AUTOSAVE_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let read =
+        save::read_file(&path).and_then(|text| save::from_json::<Autosave>(PROJECT_FORMAT, &text));
+    match read {
+        Ok(mut loaded) => {
+            loaded.value.project = loaded.value.project.checked();
+            Ok(Some(loaded))
+        }
+        Err(err) => {
+            let bad = dir.join(BAD_AUTOSAVE_FILE);
+            let _ = std::fs::remove_file(&bad);
+            std::fs::rename(&path, &bad)
+                .with_context(|| format!("could not move {} aside", path.display()))?;
+            Err(err)
+        }
+    }
+}
+
 pub fn project_json(project: &Project) -> String {
     save::to_json(PROJECT_FORMAT, project)
 }
@@ -340,6 +389,43 @@ mod tests {
         let preset = save::preset_json(&Params::default());
         let err = read_project(&preset).unwrap_err();
         assert_eq!(err.to_string(), "this is a preset, not a project");
+    }
+
+    #[test]
+    fn the_autosave_keeps_its_file_and_unsaved_flag() {
+        let dir = save::temp_dir("autosave");
+        assert!(restore_autosave(&dir).unwrap().is_none());
+        let autosave = Autosave {
+            file: Some(PathBuf::from(r"C:\shows\night.rwproject")),
+            unsaved: true,
+            project: project(),
+        };
+        save_autosave(&dir, &autosave).unwrap();
+        let restored = restore_autosave(&dir).unwrap().unwrap();
+        assert_eq!(restored.value, autosave);
+        let as_project = load_project(&dir.join(AUTOSAVE_FILE)).unwrap();
+        assert_eq!(
+            as_project.value,
+            project(),
+            "an autosave opens as a project"
+        );
+    }
+
+    #[test]
+    fn a_bad_autosave_is_kept_aside() {
+        let dir = save::temp_dir("bad-autosave");
+        std::fs::write(dir.join(AUTOSAVE_FILE), "{ older and broken").unwrap();
+        assert!(restore_autosave(&dir).is_err());
+        std::fs::write(dir.join(AUTOSAVE_FILE), "{ broken").unwrap();
+        let err = restore_autosave(&dir).unwrap_err();
+        assert_eq!(err.to_string(), "this isn't a JSON file");
+        assert!(!dir.join(AUTOSAVE_FILE).exists());
+        let kept = std::fs::read_to_string(dir.join(BAD_AUTOSAVE_FILE)).unwrap();
+        assert_eq!(
+            kept, "{ broken",
+            "the newest bad file replaces the older one"
+        );
+        assert!(restore_autosave(&dir).unwrap().is_none());
     }
 
     #[test]

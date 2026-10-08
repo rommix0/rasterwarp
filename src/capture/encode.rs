@@ -10,17 +10,24 @@ use ff::{Dictionary, Packet, Rational, codec, encoder, format, frame, software::
 use ffmpeg_next as ff;
 
 use crate::rate::FrameRate;
+use crate::save::saved_names;
 
 /// Frames that can wait for the encoder before real-time capture starts dropping them.
 pub const QUEUE: usize = 4;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum VideoFormat {
     /// HEVC 4:4:4 on the NVIDIA hardware encoder, near-lossless, in fragmented MP4.
+    #[default]
     Hevc,
     /// FFV1 lossless RGB in Matroska, on the CPU.
     Ffv1,
 }
+
+saved_names!(VideoFormat {
+    Hevc => "hevc",
+    Ffv1 => "ffv1",
+});
 
 impl VideoFormat {
     pub const ALL: [VideoFormat; 2] = [VideoFormat::Hevc, VideoFormat::Ffv1];

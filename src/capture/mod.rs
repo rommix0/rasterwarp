@@ -7,6 +7,7 @@ pub mod recorder;
 use encode::VideoFormat;
 
 use crate::rate::FrameRate;
+use crate::save::saved_names;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaptureMode {
@@ -18,6 +19,11 @@ pub enum CaptureMode {
     /// frame, waiting for the encoder when it falls behind.
     Offline,
 }
+
+saved_names!(CaptureMode {
+    RealTime => "real-time",
+    Offline => "offline",
+});
 
 impl CaptureMode {
     pub const ALL: [CaptureMode; 2] = [CaptureMode::RealTime, CaptureMode::Offline];

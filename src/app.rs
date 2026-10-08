@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use winit::application::ApplicationHandler;
@@ -24,8 +24,13 @@ use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
 use crate::preview::PreviewView;
+use crate::save::{self, Settings};
+use crate::session::{self, Autosave, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
+
+/// How often the session is autosaved (when it changed).
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
 
 pub struct App {
     initial_image: Option<PathBuf>,
@@ -75,6 +80,7 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => {
                 state.stop_recording(); // finish the file before exiting
+                state.autosave();
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => state.resize(size),
@@ -125,6 +131,23 @@ struct State {
     frame_params: FrameParams,
     /// When the previous screen refresh started, for the display rate readout.
     last_refresh: Instant,
+    /// Where the autosave and settings live.
+    data_dir: PathBuf,
+    /// The source and background image files, as a project saves them. A project's
+    /// missing image keeps its path here, so saving doesn't drop it.
+    source_path: Option<PathBuf>,
+    background_path: Option<PathBuf>,
+    /// The named project file the session belongs to; none while Untitled.
+    project_file: Option<PathBuf>,
+    /// The session as last saved or opened; none when it matches no file.
+    saved: Option<Project>,
+    /// What the autosave file holds.
+    autosaved: Option<Autosave>,
+    /// The last autosave failed (reported once until one succeeds).
+    autosave_failed: bool,
+    last_autosave: Instant,
+    /// The settings as last written.
+    settings_written: Settings,
 }
 
 impl State {
@@ -186,26 +209,17 @@ impl State {
         }
         log::info!("surface: {format:?} (composite via {composite_format:?}), {present_mode:?}");
 
+        let data_dir = save::data_dir();
+        let settings = save::load_settings(&data_dir);
         let mut ui = UiState {
             frame_ms: 16.7,
-            show_preview: true,
+            show_preview: settings.show_preview,
             canvas: CanvasChoice::new(canvas::DEFAULT, max_texture_side),
+            presets_folder: settings.presets_folder.clone(),
             ..Default::default()
         };
-        let image = match initial_image {
-            Some(path) => match load_fitting(path, max_texture_side) {
-                Ok(image) => {
-                    ui.source_info = describe(&path.display().to_string(), &image);
-                    image
-                }
-                Err(err) => {
-                    log::warn!("{err:#}");
-                    ui.load_error = Some(format!("{err:#}"));
-                    test_card(&mut ui)
-                }
-            },
-            None => test_card(&mut ui),
-        };
+        ui.capture.settings = settings.capture.clone();
+        let image = test_card(&mut ui);
         let renderer = Renderer::new(&device, &queue, composite_format, canvas::DEFAULT, &image);
 
         let egui_ctx = egui::Context::default();
@@ -225,7 +239,7 @@ impl State {
         let frame_params = motion.frame();
         let epoch = Instant::now();
 
-        Ok(Self {
+        let mut state = Self {
             window,
             surface,
             config,
@@ -246,7 +260,149 @@ impl State {
             time: 0.0,
             frame_params,
             last_refresh: epoch,
-        })
+            data_dir,
+            source_path: None,
+            background_path: None,
+            project_file: None,
+            saved: None,
+            autosaved: None,
+            autosave_failed: false,
+            last_autosave: epoch,
+            settings_written: settings,
+        };
+        state.start_session(initial_image);
+        Ok(state)
+    }
+
+    /// Picks up the last session from the autosave, if there is one, then loads the image
+    /// named on the command line over it.
+    fn start_session(&mut self, initial_image: Option<&Path>) {
+        match session::restore_autosave(&self.data_dir) {
+            Ok(Some(loaded)) => {
+                let autosave = loaded.value;
+                self.apply_project(&autosave.project);
+                self.project_file = autosave.file.clone();
+                let current = self.project();
+                self.saved = (!autosave.unsaved).then_some(current);
+                if loaded.newer {
+                    self.ui.file_note = Some(save::NEWER_NOTE.into());
+                }
+                self.autosaved = Some(autosave);
+            }
+            Ok(None) => self.saved = Some(self.project()),
+            Err(err) => {
+                log::warn!("{err:#}");
+                self.ui.file_error = Some(format!(
+                    "Couldn't restore the last session (kept as {}): {err:#}",
+                    session::BAD_AUTOSAVE_FILE
+                ));
+                self.saved = Some(self.project());
+            }
+        }
+        if let Some(path) = initial_image {
+            self.load_source(path);
+        }
+    }
+
+    /// Makes `project` the running session, at rest: its motion, canvas size, frame rate
+    /// and images. A missing image is reported and the test card (or no background) is
+    /// shown instead, but its path stays in the session.
+    fn apply_project(&mut self, project: &Project) {
+        self.motion = project.motion();
+        if self.recorder.is_none() {
+            let size = canvas::sanitize(project.canvas, self.max_texture_side);
+            if size != self.renderer.size() {
+                self.renderer.resize(&self.device, size);
+                self.preview
+                    .resize(&self.device, &mut self.egui_renderer, size);
+            }
+            self.ui.canvas = CanvasChoice::new(size, self.max_texture_side);
+            self.ui.rate = project.frame_rate;
+        }
+        let mut problems = Vec::new();
+        match &project.source {
+            Some(path) => {
+                if let Err(err) = self.open_source(path) {
+                    problems.push(image_problem("Source", path, &err));
+                    self.show_test_card();
+                }
+            }
+            None => self.show_test_card(),
+        }
+        match &project.background {
+            Some(path) => {
+                if let Err(err) = self.open_background(path) {
+                    problems.push(image_problem("Background", path, &err));
+                    self.set_background(None);
+                }
+            }
+            None => self.set_background(None),
+        }
+        self.source_path = project.source.clone();
+        self.background_path = project.background.clone();
+        self.ui.load_error = (!problems.is_empty()).then(|| problems.join("\n"));
+        self.clear_feedback();
+        // Loading images stalls; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
+    /// A snapshot of the session as a project.
+    fn project(&self) -> Project {
+        Project::capture(
+            &self.motion,
+            self.ui.canvas.current,
+            self.ui.rate,
+            self.source_path.as_deref(),
+            self.background_path.as_deref(),
+        )
+    }
+
+    /// Whether `current` differs from the project file (or, Untitled, from how the
+    /// session started).
+    fn unsaved(&self, current: &Project) -> bool {
+        self.saved.as_ref() != Some(current)
+    }
+
+    fn settings(&self) -> Settings {
+        Settings {
+            presets_folder: self.ui.presets_folder.clone(),
+            capture: self.ui.capture.settings.clone(),
+            show_preview: self.ui.show_preview,
+        }
+    }
+
+    /// Writes the session to the autosave file, and the settings to theirs, if they
+    /// changed since they were last written.
+    fn autosave(&mut self) {
+        self.last_autosave = Instant::now();
+        let project = self.project();
+        let autosave = Autosave {
+            file: self.project_file.clone(),
+            unsaved: self.unsaved(&project),
+            project,
+        };
+        if self.autosaved.as_ref() != Some(&autosave) {
+            match session::save_autosave(&self.data_dir, &autosave) {
+                Ok(()) => {
+                    self.autosaved = Some(autosave);
+                    self.autosave_failed = false;
+                }
+                Err(err) => {
+                    log::warn!("{err:#}");
+                    if !self.autosave_failed {
+                        self.ui.file_error = Some(format!("Autosave failed: {err:#}"));
+                    }
+                    self.autosave_failed = true;
+                }
+            }
+        }
+        let settings = self.settings();
+        if settings != self.settings_written {
+            match save::save_settings(&self.data_dir, &settings) {
+                Ok(()) => self.settings_written = settings,
+                Err(err) => log::warn!("{err:#}"),
+            }
+        }
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -257,12 +413,11 @@ impl State {
         }
     }
 
+    /// Loads a dropped (or command-line) image as the source.
     fn load_source(&mut self, path: &Path) {
-        match load_fitting(path, self.max_texture_side) {
-            Ok(image) => {
-                self.renderer.set_source(&self.device, &self.queue, &image);
-                self.preview.set_source(&self.device, &self.queue, &image);
-                self.ui.source_info = describe(&path.display().to_string(), &image);
+        match self.open_source(path) {
+            Ok(()) => {
+                self.source_path = Some(absolute(path));
                 self.ui.load_error = None;
             }
             Err(err) => {
@@ -274,6 +429,21 @@ impl State {
         self.clock.reanchor(self.seconds());
     }
 
+    /// Shows the image at `path` as the source.
+    fn open_source(&mut self, path: &Path) -> Result<()> {
+        let image = load_fitting(path, self.max_texture_side)?;
+        self.renderer.set_source(&self.device, &self.queue, &image);
+        self.preview.set_source(&self.device, &self.queue, &image);
+        self.ui.source_info = describe(&path.display().to_string(), &image);
+        Ok(())
+    }
+
+    fn show_test_card(&mut self) {
+        let image = test_card(&mut self.ui);
+        self.renderer.set_source(&self.device, &self.queue, &image);
+        self.preview.set_source(&self.device, &self.queue, &image);
+    }
+
     /// Asks for a background image for keyed levels and shows it.
     fn choose_background(&mut self) {
         let picked = rfd::FileDialog::new()
@@ -281,15 +451,9 @@ impl State {
             .add_filter("Images", &["png", "jpg", "jpeg"])
             .pick_file();
         if let Some(path) = picked {
-            match load_background(&path, self.max_texture_side) {
-                Ok(image) => {
-                    self.set_background(Some(&image));
-                    self.ui.background_info = Some(format!(
-                        "Background: {} ({}×{})",
-                        path.display(),
-                        image.width,
-                        image.height
-                    ));
+            match self.open_background(&path) {
+                Ok(()) => {
+                    self.background_path = Some(absolute(&path));
                     self.ui.load_error = None;
                 }
                 Err(err) => {
@@ -302,6 +466,19 @@ impl State {
         self.clock.reanchor(self.seconds());
     }
 
+    /// Shows the image at `path` behind see-through levels.
+    fn open_background(&mut self, path: &Path) -> Result<()> {
+        let image = load_background(path, self.max_texture_side)?;
+        self.set_background(Some(&image));
+        self.ui.background_info = Some(format!(
+            "Background: {} ({}×{})",
+            path.display(),
+            image.width,
+            image.height
+        ));
+        Ok(())
+    }
+
     fn set_background(&mut self, image: Option<&ColorImage>) {
         self.renderer
             .set_background(&self.device, &self.queue, image);
@@ -310,6 +487,13 @@ impl State {
         if image.is_none() {
             self.ui.background_info = None;
         }
+    }
+
+    fn clear_feedback(&mut self) {
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.renderer.clear_feedback(&mut encoder);
+        self.preview.clear_feedback(&mut encoder);
+        self.queue.submit([encoder.finish()]);
     }
 
     /// Wall-clock seconds since the app started, for the canvas clock.
@@ -527,6 +711,7 @@ impl State {
         }
         if actions.clear_background {
             self.set_background(None);
+            self.background_path = None;
         }
         if actions.stop_recording {
             self.stop_recording();
@@ -546,10 +731,10 @@ impl State {
             self.start_recording();
         }
         if actions.clear_feedback {
-            let mut encoder = self.device.create_command_encoder(&Default::default());
-            self.renderer.clear_feedback(&mut encoder);
-            self.preview.clear_feedback(&mut encoder);
-            self.queue.submit([encoder.finish()]);
+            self.clear_feedback();
+        }
+        if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+            self.autosave();
         }
 
         let offline = self
@@ -617,6 +802,20 @@ fn test_card(ui: &mut UiState) -> GrayImage {
     let image = source::test_card(1600, 900);
     ui.source_info = describe("built-in test card", &image);
     image
+}
+
+/// What to say about a project's image that didn't load.
+fn image_problem(kind: &str, path: &Path, err: &anyhow::Error) -> String {
+    if path.exists() {
+        format!("{err:#}")
+    } else {
+        format!("{kind} image not found: {}", path.display())
+    }
+}
+
+/// `path` made absolute, so a saved project finds it from any working directory.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn describe(name: &str, image: &GrayImage) -> String {

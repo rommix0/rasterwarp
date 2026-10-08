@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
 
 use super::encode::{Encoder, Frame, VideoFormat};
 use super::readback::{Readback, staging_bytes};
@@ -12,13 +13,25 @@ use super::{CaptureMode, FrameClock, file_name, unused_path};
 use crate::rate::FrameRate;
 
 /// What the panel chose before pressing Record.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RecordSettings {
     pub format: VideoFormat,
     pub mode: CaptureMode,
     pub folder: PathBuf,
     /// Stop automatically after this many seconds of video (0 = stop by hand).
     pub stop_after: f32,
+}
+
+impl Default for RecordSettings {
+    fn default() -> Self {
+        Self {
+            format: VideoFormat::Hevc,
+            mode: CaptureMode::RealTime,
+            folder: PathBuf::from("captures"),
+            stop_after: 0.0,
+        }
+    }
 }
 
 /// Progress shown while recording.

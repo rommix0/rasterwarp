@@ -2,6 +2,7 @@
 //! a missing field takes its default, an unknown field is ignored, an unknown option
 //! falls back to its default, and numbers are clamped into their ranges.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -10,6 +11,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::capture::recorder::RecordSettings;
 use crate::params::Params;
 
 /// The file format version this build writes.
@@ -20,6 +22,11 @@ pub const PRESET_EXTENSION: &str = "rwpreset";
 pub const PROJECT_FORMAT: &str = "rasterwarp-project";
 pub const PROJECT_EXTENSION: &str = "rwproject";
 pub const SETTINGS_FORMAT: &str = "rasterwarp-settings";
+pub const SETTINGS_FILE: &str = "settings.json";
+
+/// Shown when a file from a newer version was opened.
+pub const NEWER_NOTE: &str =
+    "Saved by a newer version of rasterwarp; some settings may not have loaded.";
 
 /// What was read from a file.
 #[derive(Clone, Debug, PartialEq)]
@@ -149,6 +156,65 @@ pub fn save_preset(path: &Path, params: &Params) -> Result<()> {
 
 pub fn load_preset(path: &Path) -> Result<Loaded<Params>> {
     read_preset(&read_file(path)?).with_context(|| format!("could not open {}", path.display()))
+}
+
+/// Where the autosave and settings live: `%APPDATA%\rasterwarp`.
+pub fn data_dir() -> PathBuf {
+    data_dir_in(std::env::var_os("APPDATA").as_deref())
+}
+
+/// [`data_dir`] for a given `APPDATA`; without one, `rasterwarp-data` in the working
+/// directory.
+fn data_dir_in(appdata: Option<&OsStr>) -> PathBuf {
+    match appdata {
+        Some(dir) if !dir.is_empty() => Path::new(dir).join("rasterwarp"),
+        _ => PathBuf::from("rasterwarp-data"),
+    }
+}
+
+/// App settings that belong to no project.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub presets_folder: PathBuf,
+    pub capture: RecordSettings,
+    pub show_preview: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            presets_folder: PathBuf::from("presets"),
+            capture: RecordSettings::default(),
+            show_preview: true,
+        }
+    }
+}
+
+/// The settings in `dir`, or the defaults if there are none or they can't be read.
+pub fn load_settings(dir: &Path) -> Settings {
+    let path = dir.join(SETTINGS_FILE);
+    if !path.exists() {
+        return Settings::default();
+    }
+    match read_file(&path).and_then(|text| from_json::<Settings>(SETTINGS_FORMAT, &text)) {
+        Ok(loaded) => {
+            let mut settings = loaded.value;
+            settings.capture.stop_after = settings.capture.stop_after.clamp(0.0, 3600.0);
+            settings
+        }
+        Err(err) => {
+            log::warn!("ignoring {}: {err:#}", path.display());
+            Settings::default()
+        }
+    }
+}
+
+pub fn save_settings(dir: &Path, settings: &Settings) -> Result<()> {
+    write_atomic(
+        &dir.join(SETTINGS_FILE),
+        &to_json(SETTINGS_FORMAT, settings),
+    )
 }
 
 /// A fresh, empty folder for a test's files.
@@ -299,6 +365,38 @@ mod tests {
         assert_eq!(names, ["look.rwpreset"]);
         let err = load_preset(&dir.join("missing.rwpreset")).unwrap_err();
         assert!(err.to_string().starts_with("could not read "), "{err}");
+    }
+
+    #[test]
+    fn settings_round_trip_and_fall_back_to_defaults() {
+        let dir = temp_dir("settings");
+        assert_eq!(load_settings(&dir), Settings::default());
+        let mut settings = Settings {
+            presets_folder: PathBuf::from(r"D:\looks"),
+            show_preview: false,
+            ..Settings::default()
+        };
+        settings.capture.folder = PathBuf::from(r"D:\video");
+        settings.capture.format = crate::capture::encode::VideoFormat::Ffv1;
+        settings.capture.mode = crate::capture::CaptureMode::Offline;
+        settings.capture.stop_after = 12.5;
+        save_settings(&dir, &settings).unwrap();
+        assert_eq!(load_settings(&dir), settings);
+        fs::write(dir.join(SETTINGS_FILE), "{ broken").unwrap();
+        assert_eq!(load_settings(&dir), Settings::default());
+    }
+
+    #[test]
+    fn data_lives_in_appdata() {
+        assert_eq!(
+            data_dir_in(Some(OsStr::new(r"C:\Users\me\AppData\Roaming"))),
+            Path::new(r"C:\Users\me\AppData\Roaming\rasterwarp")
+        );
+        assert_eq!(data_dir_in(None), Path::new("rasterwarp-data"));
+        assert_eq!(
+            data_dir_in(Some(OsStr::new(""))),
+            Path::new("rasterwarp-data")
+        );
     }
 
     #[test]
