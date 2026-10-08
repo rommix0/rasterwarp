@@ -14,13 +14,14 @@ use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
 use crate::canvas::{self, CanvasChoice};
+use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
-use crate::capture::{CaptureMode, OFFLINE_STEP};
 use crate::gpu;
 use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
 use crate::preview::PreviewView;
+use crate::rate::FrameRate;
 use crate::source::{self, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 
@@ -250,8 +251,8 @@ impl State {
         }
     }
 
-    /// Advances animation time: by the frame time, or by exactly 1/60 s per frame while
-    /// recording offline.
+    /// Advances animation time: by the frame time, or by exactly one frame period per
+    /// frame while recording offline.
     fn advance_animation(&mut self, dt: f32) {
         if self.ui.paused {
             return;
@@ -261,7 +262,11 @@ impl State {
             .as_ref()
             .is_some_and(|r| r.mode() == CaptureMode::Offline);
         // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
-        let step = if offline { OFFLINE_STEP } else { dt.min(0.1) };
+        let step = if offline {
+            FrameRate::default().period() as f32
+        } else {
+            dt.min(0.1)
+        };
         self.time += f64::from(step);
         self.motion.advance(step);
     }
@@ -272,7 +277,7 @@ impl State {
             &self.device,
             &self.ui.capture.settings,
             self.renderer.size(),
-            self.time,
+            FrameRate::default(),
         ) {
             Ok(recorder) => {
                 // Opening the encoder stalls; that must not count as animation time.
@@ -445,10 +450,12 @@ impl State {
             None => self.preview.hide(),
         }
         let mut capture_failed = false;
-        if let Some(recorder) = &mut self.recorder {
+        if let Some(recorder) = &mut self.recorder
+            && !self.ui.paused
+        {
             let (device, queue, renderer, time) =
                 (&self.device, &self.queue, &self.renderer, self.time);
-            let captured = recorder.capture(device, &mut encoder, time, |encoder, view| {
+            let captured = recorder.capture(device, &mut encoder, |encoder, view| {
                 renderer.composite_capture(device, queue, encoder, &frame_params, time as f32, view)
             });
             if let Err(err) = captured {

@@ -4,18 +4,17 @@ pub mod encode;
 pub mod readback;
 pub mod recorder;
 
-use encode::{FPS, VideoFormat};
+use encode::VideoFormat;
 
-/// Animation time per frame while recording offline.
-pub const OFFLINE_STEP: f32 = 1.0 / FPS as f32;
+use crate::rate::FrameRate;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CaptureMode {
-    /// Capture at 60 fps from the live output; frames the encoder can't keep up with are
-    /// dropped and counted.
+    /// Record every canvas frame as it's drawn in real time; frames the encoder can't keep
+    /// up with are dropped and counted.
     #[default]
     RealTime,
-    /// Advance animation time by exactly 1/60 s per rendered frame and capture every
+    /// Draw one canvas frame per screen refresh, whatever the time, and record every
     /// frame, waiting for the encoder when it falls behind.
     Offline,
 }
@@ -58,52 +57,25 @@ pub fn unused_path(folder: &std::path::Path, name: &str) -> std::path::PathBuf {
         .expect("an unbounded range always finds a free name")
 }
 
-/// Decides which rendered frames are recorded and their timestamps (in frames at 60 fps).
+/// Hands out a recording's timestamps: each captured canvas frame is the next frame of
+/// the file.
 #[derive(Clone, Debug)]
 pub struct FrameClock {
-    mode: CaptureMode,
-    /// Animation time when the recording started.
-    start: f64,
-    /// Animation time of the last recorded frame.
-    last: f64,
+    rate: FrameRate,
     /// The next timestamp to hand out; also the recording's length in frames.
     next: i64,
 }
 
 impl FrameClock {
-    pub fn new(mode: CaptureMode, start: f64) -> Self {
-        Self {
-            mode,
-            start,
-            last: start,
-            next: 0,
-        }
+    pub fn new(rate: FrameRate) -> Self {
+        Self { rate, next: 0 }
     }
 
-    /// The timestamp for a frame rendered at animation time `time`, or `None` to skip it.
-    /// Real-time mode records a frame whenever `(time − start) · 60`, rounded to the nearest
-    /// frame, moves on (rounding keeps a 60 Hz display's jittery frame times inside their own
-    /// frame). Offline mode records every frame whose time has moved on (so pausing records
-    /// nothing).
-    pub fn frame_due(&mut self, time: f64) -> Option<i64> {
-        let pts = match self.mode {
-            CaptureMode::Offline => {
-                if self.next > 0 && time <= self.last {
-                    return None;
-                }
-                self.next
-            }
-            CaptureMode::RealTime => {
-                let n = ((time - self.start) * f64::from(FPS) + 0.5).floor() as i64;
-                if n < self.next {
-                    return None;
-                }
-                n
-            }
-        };
-        self.next = pts + 1;
-        self.last = time;
-        Some(pts)
+    /// The timestamp for the next captured frame.
+    pub fn next_pts(&mut self) -> i64 {
+        let pts = self.next;
+        self.next += 1;
+        pts
     }
 
     /// The recording's length in frames so far.
@@ -113,13 +85,13 @@ impl FrameClock {
 
     /// The recording's length in seconds so far.
     pub fn seconds(&self) -> f64 {
-        self.next as f64 / f64::from(FPS)
+        self.rate.seconds(self.next)
     }
 
     /// Whether a recording limited to `seconds` (0 = no limit) is long enough. Counted
-    /// in whole frames, so 10/60 s stops after exactly 10 frames.
+    /// in whole frames, so 10/60 s at 60 fps stops after exactly 10 frames.
     pub fn reached(&self, seconds: f32) -> bool {
-        seconds > 0.0 && self.next >= (f64::from(seconds) * f64::from(FPS)).round() as i64
+        seconds > 0.0 && self.next >= self.rate.frames_in(f64::from(seconds))
     }
 }
 
@@ -171,63 +143,39 @@ mod tests {
     }
 
     #[test]
-    fn real_time_capture_decimates_a_fast_display_to_60_fps() {
-        let mut clock = FrameClock::new(CaptureMode::RealTime, 10.0);
-        let captured: Vec<i64> = (0..143)
-            .filter_map(|i| clock.frame_due(10.0 + f64::from(i) / 144.0))
-            .collect();
-        assert_eq!(captured, (0..60).collect::<Vec<_>>());
-        assert!((clock.seconds() - 1.0).abs() < 1e-9);
+    fn timestamps_count_captured_frames() {
+        let mut clock = FrameClock::new(FrameRate::whole(60));
+        let pts: Vec<i64> = (0..5).map(|_| clock.next_pts()).collect();
+        assert_eq!(pts, [0, 1, 2, 3, 4]);
+        assert_eq!(clock.frames(), 5);
     }
 
     #[test]
-    fn real_time_capture_keeps_every_frame_of_a_jittery_60_hz_display() {
-        let mut clock = FrameClock::new(CaptureMode::RealTime, 10.0);
-        // ±0.3 ms of timestamp noise around exact 60 Hz frame times.
-        let jitter = [0.0003, -0.0003, 0.0001, -0.0002, 0.0];
-        let captured: Vec<i64> = (0..600)
-            .filter_map(|i| clock.frame_due(10.0 + f64::from(i) / 60.0 + jitter[i as usize % 5]))
-            .collect();
-        assert_eq!(captured, (0..600).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn real_time_capture_leaves_gaps_when_rendering_is_slow() {
-        let mut clock = FrameClock::new(CaptureMode::RealTime, 0.0);
-        let captured: Vec<i64> = (0..4)
-            .filter_map(|i| clock.frame_due(f64::from(i) / 30.0))
-            .collect();
-        assert_eq!(captured, [0, 2, 4, 6]);
-    }
-
-    #[test]
-    fn paused_time_records_nothing_new() {
-        let mut clock = FrameClock::new(CaptureMode::RealTime, 0.0);
-        assert_eq!(clock.frame_due(0.5), Some(30));
-        assert_eq!(clock.frame_due(0.5), None);
-    }
-
-    #[test]
-    fn offline_capture_records_every_frame() {
-        let mut clock = FrameClock::new(CaptureMode::Offline, 3.0);
-        let captured: Vec<i64> = (0..5)
-            .filter_map(|i| clock.frame_due(3.0 + f64::from(i) * 0.25))
-            .collect();
-        assert_eq!(captured, [0, 1, 2, 3, 4]);
-        assert!((clock.seconds() - 5.0 / 60.0).abs() < 1e-9);
-        assert_eq!(clock.frame_due(4.0), None, "paused: time hasn't moved");
+    fn seconds_follow_the_frame_rate() {
+        let mut clock = FrameClock::new(FrameRate::ntsc(24));
+        for _ in 0..24 {
+            clock.next_pts();
+        }
+        assert!((clock.seconds() - 1.001).abs() < 1e-9);
     }
 
     #[test]
     fn stop_after_counts_whole_frames() {
-        let mut clock = FrameClock::new(CaptureMode::Offline, 0.0);
-        for i in 0..9 {
-            clock.frame_due(f64::from(i));
+        let mut clock = FrameClock::new(FrameRate::whole(60));
+        for _ in 0..9 {
+            clock.next_pts();
         }
         assert!(!clock.reached(10.0 / 60.0));
-        clock.frame_due(9.0);
+        clock.next_pts();
         assert!(clock.reached(10.0 / 60.0));
         assert!(!clock.reached(0.0), "0 means no limit");
+        let mut ntsc = FrameClock::new(FrameRate::ntsc(24));
+        for _ in 0..23 {
+            ntsc.next_pts();
+        }
+        assert!(!ntsc.reached(1.0));
+        ntsc.next_pts();
+        assert!(ntsc.reached(1.0), "1 s at 23.976 fps is 24 frames");
     }
 
     #[test]

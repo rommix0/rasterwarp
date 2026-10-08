@@ -1,5 +1,5 @@
-//! One recording: decides which frames to capture, reads them back from the GPU and
-//! feeds them to the encoder thread.
+//! One recording: reads captured canvas frames back from the GPU and feeds them to the
+//! encoder thread.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use super::encode::{Encoder, Frame, VideoFormat};
 use super::readback::{Readback, staging_bytes};
 use super::{CaptureMode, FrameClock, file_name, unused_path};
+use crate::rate::FrameRate;
 
 /// What the panel chose before pressing Record.
 #[derive(Clone, Debug)]
@@ -28,7 +29,7 @@ pub struct RecordStatus {
     pub seconds: f64,
     /// Frames handed to the encoder.
     pub frames: u64,
-    /// Frames lost because the encoder or the GPU readback fell behind (real-time only).
+    /// Frames lost because the encoder fell behind (real-time only).
     pub dropped: u64,
     /// Offline only: seconds of video per second of wall time.
     pub speed: Option<f64>,
@@ -49,13 +50,13 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Opens a new file in the settings' folder and starts encoding. `time` is the
-    /// current animation time.
+    /// Opens a new file in the settings' folder and starts encoding at `rate` frames per
+    /// second.
     pub fn start(
         device: &wgpu::Device,
         settings: &RecordSettings,
         canvas: (u32, u32),
-        time: f64,
+        rate: FrameRate,
     ) -> Result<Self> {
         if staging_bytes(canvas) > device.limits().max_buffer_size {
             bail!(
@@ -68,11 +69,11 @@ impl Recorder {
             .with_context(|| format!("could not create {}", settings.folder.display()))?;
         let now = chrono::Local::now().naive_local();
         let path = unused_path(&settings.folder, &file_name(now, settings.format));
-        let encoder = Encoder::start(&path, settings.format, canvas)?;
+        let encoder = Encoder::start(&path, settings.format, canvas, rate)?;
         Ok(Self {
             encoder,
             readback: Readback::new(device, canvas),
-            clock: FrameClock::new(settings.mode, time),
+            clock: FrameClock::new(rate),
             mode: settings.mode,
             stop_after: settings.stop_after,
             path,
@@ -90,34 +91,28 @@ impl Recorder {
     /// Call once per frame before rendering: hands frames that have come back from the
     /// GPU to the encoder. An error means the encoder has stopped.
     pub fn pump(&mut self, device: &wgpu::Device) -> Result<()> {
-        self.deliver(device, false)
+        self.deliver(device, false, self.mode == CaptureMode::Offline)
     }
 
-    /// Captures the frame rendered at animation time `time` if one is due: `draw` must
-    /// draw the capture composite into the given view. In offline mode this waits for
-    /// a free staging buffer; in real-time mode a busy ring drops the frame.
+    /// Captures the canvas frame just drawn as the next frame of the file: `draw` must
+    /// draw the capture composite into the given view. When every staging buffer is
+    /// still busy this waits for the GPU. Submit the frame's commands and call
+    /// [`Recorder::after_submit`] before capturing the next frame.
     pub fn capture(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        time: f64,
         draw: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::TextureView),
     ) -> Result<()> {
-        let Some(pts) = self.clock.frame_due(time) else {
-            return Ok(());
-        };
+        let pts = self.clock.next_pts();
         draw(encoder, self.readback.view());
         if self.readback.copy(encoder, pts) {
             return Ok(());
         }
-        match self.mode {
-            CaptureMode::RealTime => self.dropped += 1,
-            CaptureMode::Offline => {
-                self.deliver(device, true)?;
-                if !self.readback.copy(encoder, pts) {
-                    bail!("no capture buffer came free");
-                }
-            }
+        // Waiting for the GPU is brief; only the encoder's queue may drop frames.
+        self.deliver(device, true, self.mode == CaptureMode::Offline)?;
+        if !self.readback.copy(encoder, pts) {
+            bail!("no capture buffer came free");
         }
         Ok(())
     }
@@ -148,7 +143,7 @@ impl Recorder {
     /// the final status or the error that stopped the encoder.
     pub fn finish(mut self, device: &wgpu::Device) -> Result<RecordStatus> {
         while self.readback.is_busy() {
-            if let Err(err) = self.deliver(device, true) {
+            if let Err(err) = self.deliver(device, true, true) {
                 return Err(self.encoder.finish().err().unwrap_or(err));
             }
         }
@@ -158,9 +153,10 @@ impl Recorder {
         Ok(status)
     }
 
-    /// Sends finished readbacks to the encoder. Waits for the GPU when `wait` is set;
-    /// then sends block too, so no frame is dropped.
-    fn deliver(&mut self, device: &wgpu::Device, wait: bool) -> Result<()> {
+    /// Sends finished readbacks to the encoder. Waits for the GPU when `wait` is set, and
+    /// for room in the encoder's queue when `block` is set (otherwise a full queue drops
+    /// the frame).
+    fn deliver(&mut self, device: &wgpu::Device, wait: bool, block: bool) -> Result<()> {
         while let Some(buffer) = self.encoder.recycled_buffer() {
             self.spare.push(buffer);
         }
@@ -168,15 +164,14 @@ impl Recorder {
         let frames = self
             .readback
             .collect(device, wait, || spare.pop().unwrap_or_default())?;
-        let blocking = wait || self.mode == CaptureMode::Offline;
         for frame in frames {
-            self.send(frame, blocking)?;
+            self.send(frame, block)?;
         }
         Ok(())
     }
 
-    fn send(&mut self, frame: Frame, blocking: bool) -> Result<()> {
-        if blocking {
+    fn send(&mut self, frame: Frame, block: bool) -> Result<()> {
+        if block {
             self.encoder.send(frame)?;
         } else if let Some(frame) = self.encoder.try_send(frame)? {
             self.dropped += 1;

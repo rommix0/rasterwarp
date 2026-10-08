@@ -9,8 +9,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use ff::{Dictionary, Packet, Rational, codec, encoder, format, frame, software::scaling};
 use ffmpeg_next as ff;
 
-/// Frames per second of every recording.
-pub const FPS: i32 = 60;
+use crate::rate::FrameRate;
+
 /// Frames that can wait for the encoder before real-time capture starts dropping them.
 pub const QUEUE: usize = 4;
 
@@ -42,7 +42,7 @@ impl VideoFormat {
 
 /// One captured frame: tightly packed sRGB RGBA rows, `width × height × 4` bytes.
 pub struct Frame {
-    /// Presentation time in frames at [`FPS`].
+    /// Presentation time in frames at the recording's frame rate.
     pub pts: i64,
     pub rgba: Vec<u8>,
 }
@@ -55,9 +55,15 @@ pub struct Encoder {
 }
 
 impl Encoder {
-    /// Opens `path` for writing and starts the encoder thread. Fails without leaving a
-    /// file behind if the file exists or the encoder can't be opened.
-    pub fn start(path: &Path, format: VideoFormat, size: (u32, u32)) -> Result<Self> {
+    /// Opens `path` for writing at `rate` frames per second and starts the encoder
+    /// thread. Fails without leaving a file behind if the file exists or the encoder
+    /// can't be opened.
+    pub fn start(
+        path: &Path,
+        format: VideoFormat,
+        size: (u32, u32),
+        rate: FrameRate,
+    ) -> Result<Self> {
         if path.exists() {
             bail!("{} already exists", path.display());
         }
@@ -67,7 +73,7 @@ impl Encoder {
         let owned = path.to_path_buf();
         let thread = std::thread::Builder::new()
             .name("encoder".into())
-            .spawn(move || run(owned, format, size, frames_rx, recycle_tx, ready_tx))
+            .spawn(move || run(owned, format, size, rate, frames_rx, recycle_tx, ready_tx))
             .context("could not start the encoder thread")?;
         match ready.recv() {
             Ok(Ok(())) => Ok(Self {
@@ -137,11 +143,12 @@ fn run(
     path: PathBuf,
     format: VideoFormat,
     size: (u32, u32),
+    rate: FrameRate,
     frames: Receiver<Frame>,
     recycled: Sender<Vec<u8>>,
     ready: SyncSender<Result<()>>,
 ) -> Result<u64> {
-    let mut sink = match Sink::open(&path, format, size) {
+    let mut sink = match Sink::open(&path, format, size, rate) {
         Ok(sink) => {
             let _ = ready.send(Ok(()));
             sink
@@ -182,14 +189,17 @@ struct Sink {
     convert: Convert,
     frame: frame::Video,
     size: (u32, u32),
+    /// One frame: the time base the frames' timestamps count in.
+    time_base: Rational,
     stream_time_base: Rational,
 }
 
 impl Sink {
-    fn open(path: &Path, format: VideoFormat, size: (u32, u32)) -> Result<Self> {
+    fn open(path: &Path, format: VideoFormat, size: (u32, u32), rate: FrameRate) -> Result<Self> {
         ff::init().context("could not initialise FFmpeg")?;
         let (width, height) = size;
-        let time_base = Rational(1, FPS);
+        let frame_rate = Rational(rate.num, rate.den);
+        let time_base = frame_rate.invert();
         let (codec_name, pixel) = match format {
             VideoFormat::Hevc => ("hevc_nvenc", format::Pixel::YUV444P),
             VideoFormat::Ffv1 => ("ffv1", format::Pixel::BGRA),
@@ -210,8 +220,8 @@ impl Sink {
         setup.set_height(height);
         setup.set_format(pixel);
         setup.set_time_base(time_base);
-        setup.set_frame_rate(Some(Rational(FPS, 1)));
-        setup.set_gop(FPS as u32);
+        setup.set_frame_rate(Some(frame_rate));
+        setup.set_gop(rate.keyframe_interval());
         setup.set_max_b_frames(0);
         let mut options = Dictionary::new();
         match format {
@@ -261,8 +271,8 @@ impl Sink {
         stream.set_parameters(&encoder);
         stream.set_time_base(time_base);
         // Declare the constant frame rate so players don't have to infer it.
-        stream.set_rate(Rational(FPS, 1));
-        stream.set_avg_frame_rate(Rational(FPS, 1));
+        stream.set_rate(frame_rate);
+        stream.set_avg_frame_rate(frame_rate);
         let mut header = Dictionary::new();
         if format == VideoFormat::Hevc {
             // Fragmented MP4 stays playable if the recording is interrupted.
@@ -313,6 +323,7 @@ impl Sink {
             convert,
             frame: frame::Video::new(pixel, width, height),
             size,
+            time_base,
             stream_time_base,
         })
     }
@@ -363,7 +374,7 @@ impl Sink {
                 Ok(()) => {
                     packet.set_stream(0);
                     packet.set_duration(1); // one frame; the MP4 muxer warns without it
-                    packet.rescale_ts(Rational(1, FPS), self.stream_time_base);
+                    packet.rescale_ts(self.time_base, self.stream_time_base);
                     packet.write_interleaved(&mut self.output)?;
                 }
                 // EAGAIN means the encoder wants more input; Eof follows the final flush.

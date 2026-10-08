@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ffmpeg_next as ff;
 use rasterwarp::capture::encode::{Encoder, Frame, VideoFormat};
+use rasterwarp::rate::FrameRate;
 
 const SIZE: (u32, u32) = (320, 180);
 const FRAMES: i64 = 30;
@@ -34,8 +35,8 @@ fn pattern(index: i64) -> Vec<u8> {
     rgba
 }
 
-fn encode(path: &Path, format: VideoFormat) -> anyhow::Result<u64> {
-    let encoder = Encoder::start(path, format, SIZE)?;
+fn encode(path: &Path, format: VideoFormat, rate: FrameRate) -> anyhow::Result<u64> {
+    let encoder = Encoder::start(path, format, SIZE, rate)?;
     for pts in 0..FRAMES {
         encoder.send(Frame {
             pts,
@@ -45,8 +46,9 @@ fn encode(path: &Path, format: VideoFormat) -> anyhow::Result<u64> {
     encoder.finish()
 }
 
-/// Decodes every frame of `path` to tightly packed RGBA (BT.709 for YUV input).
-fn decode(path: &Path) -> Vec<(u32, u32, Vec<u8>)> {
+/// Decodes every frame of `path` to tightly packed RGBA (BT.709 for YUV input), checking
+/// that the file declares `rate`.
+fn decode(path: &Path, rate: FrameRate) -> Vec<(u32, u32, Vec<u8>)> {
     ff::init().unwrap();
     let mut input = ff::format::input(path).expect("open the recording");
     let stream = input
@@ -54,11 +56,9 @@ fn decode(path: &Path) -> Vec<(u32, u32, Vec<u8>)> {
         .best(ff::media::Type::Video)
         .expect("a video stream");
     let index = stream.index();
-    assert_eq!(
-        stream.avg_frame_rate(),
-        ff::Rational(60, 1),
-        "declared frame rate"
-    );
+    let declared = ff::Rational(rate.num, rate.den);
+    assert_eq!(stream.avg_frame_rate(), declared, "declared frame rate");
+    assert_eq!(stream.rate(), declared, "stream frame rate");
     let context = ff::codec::context::Context::from_parameters(stream.parameters()).unwrap();
     let mut decoder = context.decoder().video().unwrap();
     let (w, h) = (decoder.width(), decoder.height());
@@ -119,8 +119,9 @@ fn decode(path: &Path) -> Vec<(u32, u32, Vec<u8>)> {
 #[test]
 fn ffv1_recording_is_lossless() {
     let path = temp_file("ffv1", "mkv");
-    assert_eq!(encode(&path, VideoFormat::Ffv1).expect("encode"), 30);
-    let frames = decode(&path);
+    let rate = FrameRate::default();
+    assert_eq!(encode(&path, VideoFormat::Ffv1, rate).expect("encode"), 30);
+    let frames = decode(&path, rate);
     assert_eq!(frames.len(), FRAMES as usize);
     let (w, h, rgba) = &frames[7];
     assert_eq!((*w, *h), SIZE);
@@ -133,7 +134,8 @@ fn ffv1_recording_is_lossless() {
 #[test]
 fn hevc_recording_is_close_to_the_source() {
     let path = temp_file("hevc", "mp4");
-    let written = match encode(&path, VideoFormat::Hevc) {
+    let rate = FrameRate::default();
+    let written = match encode(&path, VideoFormat::Hevc, rate) {
         Ok(written) => written,
         Err(err) => {
             eprintln!("skipping HEVC test: {err:#}");
@@ -141,7 +143,7 @@ fn hevc_recording_is_close_to_the_source() {
         }
     };
     assert_eq!(written, 30);
-    let frames = decode(&path);
+    let frames = decode(&path, rate);
     assert_eq!(frames.len(), FRAMES as usize);
     let (w, h, rgba) = &frames[7];
     assert_eq!((*w, *h), SIZE);
@@ -156,10 +158,18 @@ fn hevc_recording_is_close_to_the_source() {
 }
 
 #[test]
+fn recordings_declare_an_ntsc_rate_exactly() {
+    let path = temp_file("ntsc", "mkv");
+    let rate = FrameRate::ntsc(24);
+    assert_eq!(encode(&path, VideoFormat::Ffv1, rate).expect("encode"), 30);
+    assert_eq!(decode(&path, rate).len(), FRAMES as usize);
+}
+
+#[test]
 fn an_existing_file_is_not_overwritten() {
     let path = temp_file("exists", "mkv");
     std::fs::write(&path, b"keep me").unwrap();
-    let err = Encoder::start(&path, VideoFormat::Ffv1, SIZE)
+    let err = Encoder::start(&path, VideoFormat::Ffv1, SIZE, FrameRate::default())
         .err()
         .expect("start must fail");
     assert!(format!("{err:#}").contains("already exists"));
