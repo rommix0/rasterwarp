@@ -16,6 +16,8 @@ pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormS
 
 pub struct Renderer {
     size: (u32, u32),
+    /// This renderer's pixels per program canvas pixel (see [`Renderer::set_pixel_scale`]).
+    pixel_scale: f32,
     source: wgpu::TextureView,
     source_aspect: f32,
     /// What keyed levels show.
@@ -46,6 +48,7 @@ impl Renderer {
         let (w, h) = size;
         Self {
             size,
+            pixel_scale: 1.0,
             source: source::upload(device, queue, image).create_view(&Default::default()),
             source_aspect: image.aspect(),
             background: source::upload_color(device, queue, &ColorImage::black())
@@ -65,6 +68,14 @@ impl Renderer {
     /// The internal (canvas) resolution.
     pub fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    /// Sets how many of this renderer's pixels make one program canvas pixel: 1.0 (the
+    /// default) when it renders at the canvas size, less for a smaller off-air preview.
+    /// Parameters measured in canvas pixels (beam width, line jitter, edge fringe) are
+    /// scaled by it, so a smaller renderer shows the same picture.
+    pub fn set_pixel_scale(&mut self, scale: f32) {
+        self.pixel_scale = scale;
     }
 
     /// Rebuilds every canvas-sized target at `size`. The trails start out cleared.
@@ -128,7 +139,14 @@ impl Renderer {
         time: f32,
     ) {
         let aspect = self.size.0 as f32 / self.size.1 as f32;
-        let deflection = warp::uniforms(&frame.warp, time, aspect, self.source_aspect, self.size.1);
+        let deflection = warp::uniforms(
+            &frame.warp,
+            time,
+            aspect,
+            self.source_aspect,
+            self.size.1,
+            self.pixel_scale,
+        );
         if frame.raster.enabled {
             let before = self.previous.unwrap_or(deflection);
             self.raster.render(
@@ -137,7 +155,13 @@ impl Renderer {
                 encoder,
                 &self.source,
                 &self.warp.target.view,
-                &raster::uniforms(&frame.raster, &deflection, &before, self.size),
+                &raster::uniforms(
+                    &frame.raster,
+                    &deflection,
+                    &before,
+                    self.size,
+                    self.pixel_scale,
+                ),
             );
         } else {
             self.warp
@@ -149,7 +173,7 @@ impl Renderer {
             queue,
             encoder,
             &self.warp.target.view,
-            &colorize::uniforms(&frame.colorize, &frame.key),
+            &colorize::uniforms(&frame.colorize, &frame.key, self.pixel_scale),
         );
         self.feedback.render(
             device,

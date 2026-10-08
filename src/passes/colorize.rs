@@ -19,8 +19,10 @@ pub struct ColorizeUniforms {
     pub extra: [f32; 4],
 }
 
-pub fn uniforms(c: &ColorizeFrame, key: &KeyParams) -> ColorizeUniforms {
-    let (weights, taps) = fringe::kernel(c.bandwidth, c.ringing);
+/// `pixel_scale` is the target pixels per canvas pixel, which converts the edge fringe
+/// bandwidth (canvas pixels) to target pixels.
+pub fn uniforms(c: &ColorizeFrame, key: &KeyParams, pixel_scale: f32) -> ColorizeUniforms {
+    let (weights, taps) = fringe::kernel(c.bandwidth * pixel_scale, c.ringing);
     ColorizeUniforms {
         settings: [
             c.levels as f32,
@@ -117,7 +119,7 @@ mod tests {
         frame.bypass = true;
         frame.palette_linear[1] = [0.25, 0.5, 0.75];
         frame.thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7];
-        let u = uniforms(&frame, &Params::default().key);
+        let u = uniforms(&frame, &Params::default().key, 1.0);
         assert_eq!(u.settings, [6.0, frame.softness, 2.5, 1.0]);
         assert_eq!(u.palette[1], [0.25, 0.5, 0.75, 1.0]);
         assert_eq!(u.thresholds, [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 1.0]]);
@@ -128,15 +130,20 @@ mod tests {
         let mut frame = FrameParams::at_rest(&Params::default()).colorize;
         frame.bandwidth = 0.0;
         let key = Params::default().key;
-        let u = uniforms(&frame, &key);
+        let u = uniforms(&frame, &key, 1.0);
         assert_eq!(u.extra[0], 1.0, "one tap");
         assert_eq!(u.fringe[0], [1.0, 0.0, 0.0, 0.0]);
         frame.bandwidth = 3.0;
         frame.ringing = 0.4;
         let (weights, taps) = fringe::kernel(3.0, 0.4);
-        let u = uniforms(&frame, &key);
+        let u = uniforms(&frame, &key, 1.0);
         assert_eq!(u.extra[0], taps as f32);
         assert_eq!(u.fringe[2][1], weights[9]);
+        // A half-size renderer smears over half as many of its own pixels.
+        let (weights, taps) = fringe::kernel(1.5, 0.4);
+        let u = uniforms(&frame, &key, 0.5);
+        assert_eq!(u.extra[0], taps as f32);
+        assert_eq!(u.fringe[0][1], weights[1]);
     }
 
     #[test]
@@ -146,11 +153,11 @@ mod tests {
             enabled: true,
             levels: 0b101,
         };
-        assert_eq!(uniforms(&frame, &key).extra[1..3], [1.0, 5.0]);
+        assert_eq!(uniforms(&frame, &key, 1.0).extra[1..3], [1.0, 5.0]);
         let off = KeyParams {
             enabled: false,
             ..key
         };
-        assert_eq!(uniforms(&frame, &off).extra[1], 0.0);
+        assert_eq!(uniforms(&frame, &off, 1.0).extra[1], 0.0);
     }
 }

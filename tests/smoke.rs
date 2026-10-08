@@ -388,9 +388,22 @@ fn render_frame(
     image: &GrayImage,
     size: (u32, u32),
 ) -> Vec<u8> {
+    render_scaled(device, queue, frame, image, size, 1.0)
+}
+
+/// Like `render_frame`, for a renderer with `pixel_scale` of its pixels per canvas pixel.
+fn render_scaled(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frame: &FrameParams,
+    image: &GrayImage,
+    size: (u32, u32),
+    pixel_scale: f32,
+) -> Vec<u8> {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let output = gpu::RenderTarget::new(device, "still", size.0, size.1, format);
     let mut renderer = Renderer::new(device, queue, format, size, image);
+    renderer.set_pixel_scale(pixel_scale);
     let mut encoder = device.create_command_encoder(&Default::default());
     renderer.render(device, queue, &mut encoder, frame, 0.0, &output.view, size);
     queue.submit([encoder.finish()]);
@@ -563,6 +576,76 @@ fn raster_mode_draws_separate_scan_lines() {
         centres.windows(2).all(|w| w[1] - w[0] == 8),
         "one line every 8 rows: {centres:?}"
     );
+}
+
+#[test]
+fn small_raster_renderer_matches_the_canvas_brightness() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let white = GrayImage {
+        width: 160,
+        height: 90,
+        pixels: vec![255; 160 * 90],
+    };
+    let mut params = flat_params();
+    params.colorize.bypass = true; // compare the raster brightness itself
+    params.raster.enabled = true; // default lines and beam width
+    let frame = FrameParams::at_rest(&params);
+    // Mean red value over the middle half of the picture, 0-1.
+    let mean = |pixels: &[u8], size: (u32, u32)| -> f32 {
+        let (w, h) = size;
+        let mut sum = 0u64;
+        let mut count = 0u64;
+        for y in h / 4..h * 3 / 4 {
+            for x in w / 4..w * 3 / 4 {
+                sum += u64::from(pixels[((y * w + x) * 4) as usize]);
+                count += 1;
+            }
+        }
+        sum as f32 / count as f32 / 255.0
+    };
+    let canvas = (1920, 1080);
+    let preview = (480, 270);
+    let full = mean(
+        &render_scaled(&device, &queue, &frame, &white, canvas, 1.0),
+        canvas,
+    );
+    let small = mean(
+        &render_scaled(&device, &queue, &frame, &white, preview, 0.25),
+        preview,
+    );
+    assert!(
+        (small / full - 1.0).abs() < 0.1,
+        "canvas mean {full:.3}, quarter-size preview mean {small:.3}"
+    );
+}
+
+#[test]
+fn sub_pixel_beams_do_not_drop_lines() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let white = GrayImage {
+        width: 160,
+        height: 90,
+        pixels: vec![255; 160 * 90],
+    };
+    let mut params = flat_params();
+    params.colorize.bypass = true;
+    params.raster.enabled = true;
+    params.raster.lines = 100; // 2.7 preview rows apart; the beam is 0.3 preview pixels
+    let size = (480, 270);
+    let frame = FrameParams::at_rest(&params);
+    let pixels = render_scaled(&device, &queue, &frame, &white, size, 0.25);
+    let lit: Vec<bool> = (0..size.1)
+        .map(|y| pixels[((y * size.0 + size.0 / 2) * 4) as usize] > 20)
+        .collect();
+    let mut gap = 0;
+    for &on in &lit[20..250] {
+        gap = if on { 0 } else { gap + 1 };
+        assert!(gap <= 2, "a line dropped out: lit rows {lit:?}");
+    }
 }
 
 /// Sets up a keying test: striped grayscale image, red background, keying params.

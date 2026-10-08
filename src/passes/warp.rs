@@ -44,13 +44,15 @@ pub fn source_fit(frame_aspect: f32, source_aspect: f32) -> [f32; 2] {
     }
 }
 
-/// `canvas_height` (pixels) converts the line jitter to frame heights.
+/// `height` is the target height in pixels and `pixel_scale` the target pixels per
+/// canvas pixel; together they convert the line jitter (canvas pixels) to frame heights.
 pub fn uniforms(
     w: &WarpFrame,
     time: f32,
     frame_aspect: f32,
     source_aspect: f32,
-    canvas_height: u32,
+    height: u32,
+    pixel_scale: f32,
 ) -> WarpUniforms {
     let fit = source_fit(frame_aspect, source_aspect);
     let count = w.oscillators.len().min(MAX_SLOTS);
@@ -63,7 +65,7 @@ pub fn uniforms(
         transform: [w.zoom, w.rotation, w.offset[0], w.offset[1]],
         source_size: [fit[0], fit[1], 0.0, 0.0],
         look: [
-            w.line_jitter / canvas_height as f32,
+            w.line_jitter * pixel_scale / height as f32,
             w.axis_wander,
             0.0,
             0.0,
@@ -180,7 +182,7 @@ mod tests {
     fn packs_oscillator_slots() {
         let p = Params::default();
         let frame = FrameParams::at_rest(&p);
-        let u = uniforms(&frame.warp, 2.0, 16.0 / 9.0, 1.0, 1080);
+        let u = uniforms(&frame.warp, 2.0, 16.0 / 9.0, 1.0, 1080, 1.0);
         assert_eq!(u.frame[0], 2.0);
         assert_eq!(u.frame[3], 4.0, "slot count");
         // Default oscillator 2: triangle, Y target, U input, oscillator index 1.
@@ -202,7 +204,7 @@ mod tests {
         let clocks = crate::blend::Clocks::default();
         let frame = crate::blend::blend(&a, &b, 0.5, Some(0.5), &clocks, &clocks);
         assert_eq!(frame.warp.oscillators.len(), MAX_SLOTS);
-        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 1080);
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 1080, 1.0);
         assert_eq!(u.frame[3], MAX_SLOTS as f32, "slot count");
         assert!(u.osc[MAX_SLOTS - 1].wave[1] > 0.0, "last slot is packed");
     }
@@ -213,8 +215,11 @@ mod tests {
         frame.warp.line_jitter = 4.0;
         frame.warp.axis_wander = 0.6;
         frame.warp.seed = 77;
-        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 800);
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 800, 1.0);
         assert_eq!(u.look, [0.005, 0.6, 0.0, 0.0]);
         assert_eq!(u.seed, [77, 0, 0, 0]);
+        // A quarter-size renderer: 4 canvas pixels are 1 of its 200 pixels, still 0.005.
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 200, 0.25);
+        assert_eq!(u.look[0], 0.005);
     }
 }

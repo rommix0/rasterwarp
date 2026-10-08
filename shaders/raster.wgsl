@@ -5,8 +5,8 @@
 struct Raster {
     now: Deflection,
     before: Deflection, // the previous canvas frame's deflection, for the beam speed
-    beam: vec4<f32>,    // lines, beam width (frame heights), compensation, speed compensation
-    misc: vec4<f32>,    // samples per line, unused, unused, unused
+    beam: vec4<f32>,    // lines, drawn beam width (frame heights), compensation, speed compensation
+    misc: vec4<f32>,    // samples per line, width gain (true / drawn beam width), unused, unused
 };
 
 @group(0) @binding(0) var<uniform> r: Raster;
@@ -70,7 +70,8 @@ fn vs_beam(@builtin(vertex_index) vi: u32, @builtin(instance_index) line: u32) -
     out.pos = vec4<f32>(p.x / (0.5 * aspect), -2.0 * p.y, 0.0, 1.0);
     out.suv = vec2<f32>(u, v);
     out.across = side;
-    out.gain = area * boost;
+    // A beam narrower than a pixel is drawn a pixel wide and dimmed to match.
+    out.gain = area * boost * r.misc.y;
     return out;
 }
 

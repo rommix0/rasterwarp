@@ -19,6 +19,11 @@ pub fn size_for(canvas: (u32, u32)) -> (u32, u32) {
     (WIDTH, height.max(64))
 }
 
+/// The preview's pixels per canvas pixel: its height over the canvas height.
+pub fn pixel_scale(canvas: (u32, u32)) -> f32 {
+    size_for(canvas).1 as f32 / canvas.1 as f32
+}
+
 pub struct PreviewView {
     renderer: Renderer,
     target: RenderTarget,
@@ -39,8 +44,10 @@ impl PreviewView {
         let target = RenderTarget::new(device, "preview", size.0, size.1, FORMAT);
         let texture_id =
             egui_renderer.register_native_texture(device, &target.view, wgpu::FilterMode::Linear);
+        let mut renderer = Renderer::new(device, queue, FORMAT, size, image);
+        renderer.set_pixel_scale(pixel_scale(canvas));
         Self {
-            renderer: Renderer::new(device, queue, FORMAT, size, image),
+            renderer,
             target,
             texture_id,
             shown: None,
@@ -63,6 +70,8 @@ impl PreviewView {
         egui_renderer: &mut egui_wgpu::Renderer,
         canvas: (u32, u32),
     ) {
+        // The scale follows the canvas height even when the preview size stays.
+        self.renderer.set_pixel_scale(pixel_scale(canvas));
         let size = size_for(canvas);
         if size == self.size() {
             return;
@@ -135,6 +144,13 @@ mod tests {
         assert_eq!(size_for((1920, 1080)), (480, 270));
         assert_eq!(size_for((640, 480)), (480, 360));
         assert_eq!(size_for((854, 480)), (480, 270));
+    }
+
+    #[test]
+    fn pixel_scale_is_the_preview_height_over_the_canvas_height() {
+        assert_eq!(pixel_scale((1920, 1080)), 0.25);
+        assert_eq!(pixel_scale((1280, 720)), 0.375);
+        assert_eq!(pixel_scale((640, 480)), 0.75);
     }
 
     #[test]
