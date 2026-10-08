@@ -26,7 +26,7 @@
 
 ## Design decisions made while building (beyond the spec text)
 
-1. **Enums are saved by name** (`"sine"`, `"transition"`, `"real-time"`, …) through the `saved_names!` macro, which also makes unknown names read as the default. Curves are `"linear"`, `"s-curve"` or `"custom:<id>"`; an unknown or missing curve becomes Linear.
+1. **Enums are saved by name** (`"sine"`, `"transition"`, `"real-time"`, …) through the `saved_names!` macro, which also makes unknown names read as the default. Curves are `"linear"`, `"s-curve"` or `"custom:<id>"`; an unknown curve (or one naming a user curve not in the file) becomes Linear, and a missing curve field takes its default like any other field.
 2. **Unsaved changes** are found by comparing project snapshots. Panel widgets therefore must not change values just by being drawn: the palette color buttons edit a copy (their color conversion isn't exact), and the threshold sliders show 3 decimals with a formatter instead of rounding the value (`max_decimals` rounds it every frame). Ramps in progress, the sequence's position and the oscillator phases are not in the snapshot, so a running transition doesn't count as a change.
 3. **The canvas is saved as its size** (the preset choice follows from it), sanitized on opening and again against the GPU's limit when applied.
 4. **The autosave is a project file** with two more fields (`file`, `unsaved`), so it also opens as a project. Restoring it sets the "last saved" snapshot only when it wasn't unsaved.
