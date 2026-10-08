@@ -2,6 +2,7 @@
 //! screen refresh draws the canvas frames that are due at the program frame rate, then
 //! shows the newest one with the UI on top.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,6 +34,9 @@ use crate::ui::{self, UiActions, UiState};
 
 /// How often the session is autosaved (when it changed).
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How the panel starts an autosave failure, so a later success can clear it.
+const AUTOSAVE_FAILED: &str = "Autosave failed: ";
 
 pub struct App {
     initial_image: Option<PathBuf>,
@@ -135,6 +139,11 @@ struct State {
     last_refresh: Instant,
     /// Where the autosave and settings live.
     data_dir: PathBuf,
+    /// The lock that makes this the one window that autosaves and writes the settings.
+    /// Held until exit; none when another window holds it.
+    session_lock: Option<File>,
+    /// No autosave this run: another window owns it, or an unreadable one is in the way.
+    autosave_off: bool,
     /// The source and background image files, as a project saves them. A project's
     /// missing image keeps its path here, so saving doesn't drop it.
     source_path: Option<PathBuf>,
@@ -212,6 +221,7 @@ impl State {
         log::info!("surface: {format:?} (composite via {composite_format:?}), {present_mode:?}");
 
         let data_dir = save::data_dir();
+        let session_lock = session::lock_session(&data_dir);
         let settings = save::load_settings(&data_dir);
         let mut ui = UiState {
             frame_ms: 16.7,
@@ -263,6 +273,8 @@ impl State {
             frame_params,
             last_refresh: epoch,
             data_dir,
+            session_lock,
+            autosave_off: false,
             source_path: None,
             background_path: None,
             project_file: None,
@@ -277,9 +289,18 @@ impl State {
     }
 
     /// Picks up the last session from the autosave, if there is one, then loads the image
-    /// named on the command line over it.
+    /// named on the command line over it. Another window owns the autosave if it holds the
+    /// lock; then this one starts fresh and leaves it alone.
     fn start_session(&mut self, initial_image: Option<&Path>) {
-        match session::restore_autosave(&self.data_dir) {
+        let restored = if self.session_lock.is_some() {
+            session::restore_autosave(&self.data_dir)
+        } else {
+            self.autosave_off = true;
+            self.ui.session_note =
+                Some("Another rasterwarp window is open; this one won't autosave.".into());
+            Ok(None)
+        };
+        match restored {
             Ok(Some(loaded)) => {
                 let autosave = loaded.value;
                 self.apply_project(&autosave.project);
@@ -294,10 +315,19 @@ impl State {
             Ok(None) => self.saved = Some(self.project()),
             Err(err) => {
                 log::warn!("{err:#}");
-                self.ui.file_error = Some(format!(
-                    "Couldn't restore the last session (kept as {}): {err:#}",
-                    session::BAD_AUTOSAVE_FILE
-                ));
+                self.ui.file_error = Some(if err.is::<session::LeftInPlace>() {
+                    // The next autosave would overwrite it.
+                    self.autosave_off = true;
+                    format!(
+                        "Couldn't restore the last session; the file was left in place, so \
+                         this run won't autosave: {err:#}"
+                    )
+                } else {
+                    format!(
+                        "Couldn't restore the last session (kept as {}): {err:#}",
+                        session::BAD_AUTOSAVE_FILE
+                    )
+                });
                 self.saved = Some(self.project());
             }
         }
@@ -384,23 +414,31 @@ impl State {
             unsaved: self.unsaved(&project),
             project,
         };
-        if self.autosaved.as_ref() != Some(&autosave) {
+        if !self.autosave_off && self.autosaved.as_ref() != Some(&autosave) {
             match session::save_autosave(&self.data_dir, &autosave) {
                 Ok(()) => {
                     self.autosaved = Some(autosave);
-                    self.autosave_failed = false;
+                    if self.autosave_failed {
+                        self.autosave_failed = false;
+                        if let Some(shown) = &self.ui.file_error
+                            && shown.starts_with(AUTOSAVE_FAILED)
+                        {
+                            self.ui.file_error = None;
+                        }
+                    }
                 }
                 Err(err) => {
                     log::warn!("{err:#}");
                     if !self.autosave_failed {
-                        self.ui.file_error = Some(format!("Autosave failed: {err:#}"));
+                        self.ui.file_error = Some(format!("{AUTOSAVE_FAILED}{err:#}"));
                     }
                     self.autosave_failed = true;
                 }
             }
         }
+        // Another window owns the settings file too.
         let settings = self.settings();
-        if settings != self.settings_written {
+        if self.session_lock.is_some() && settings != self.settings_written {
             match save::save_settings(&self.data_dir, &settings) {
                 Ok(()) => self.settings_written = settings,
                 Err(err) => log::warn!("{err:#}"),
@@ -981,7 +1019,8 @@ impl State {
             self.clear_feedback();
         }
         self.file_actions(actions.files);
-        if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+        // Not while recording; closing the window still autosaves.
+        if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL && self.recorder.is_none() {
             self.autosave();
         }
 

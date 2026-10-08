@@ -37,6 +37,8 @@ pub struct UiState {
     pub file_error: Option<String>,
     /// News about the last file opened (e.g. that a newer version wrote it).
     pub file_note: Option<String>,
+    /// Why this window doesn't autosave. It stays up; file messages come and go.
+    pub session_note: Option<String>,
     pub presets_folder: PathBuf,
     /// The keying background's description, if one is loaded.
     pub background_info: Option<String>,
@@ -111,6 +113,9 @@ pub fn draw(
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
                 }
                 if let Some(note) = &state.file_note {
+                    ui.label(note);
+                }
+                if let Some(note) = &state.session_note {
                     ui.label(note);
                 }
                 ui.label("Drop an image, preset or project onto the window.");

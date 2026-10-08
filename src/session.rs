@@ -2,6 +2,8 @@
 //! the sequence, user curves, canvas size, frame rate and image paths, but nothing in
 //! motion (ramp progress, the sequence's position, phases, trails).
 
+use std::fmt;
+use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -192,9 +194,41 @@ pub fn save_autosave(dir: &Path, autosave: &Autosave) -> Result<()> {
     )
 }
 
+/// Held by the one window that owns the autosave, so a second window doesn't restore
+/// and overwrite it.
+pub const LOCK_FILE: &str = "session.lock";
+
+/// Takes the exclusive lock on `dir`'s [`LOCK_FILE`], creating the folder if needed. None
+/// when another window holds it. It lasts as long as the returned file, and the OS drops
+/// it when the app exits or crashes. (Only Windows can refuse a second open; the app
+/// runs nowhere else.)
+pub fn lock_session(dir: &Path) -> Option<File> {
+    fs::create_dir_all(dir).ok()?;
+    let mut options = OpenOptions::new();
+    options.write(true).create(true).truncate(false);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.share_mode(0);
+    }
+    options.open(dir.join(LOCK_FILE)).ok()
+}
+
+/// Why an unreadable autosave couldn't be moved aside: it is still where the next
+/// autosave would overwrite it.
+#[derive(Debug)]
+pub struct LeftInPlace(String);
+
+impl fmt::Display for LeftInPlace {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// The autosave in `dir`, if there is one. One that can't be read is renamed to
 /// [`BAD_AUTOSAVE_FILE`] (replacing an older one) so the next autosave doesn't
-/// overwrite it, and the error says why.
+/// overwrite it, and the error says why. If it can't be moved, the error says so
+/// ([`LeftInPlace`]) and still says why.
 pub fn restore_autosave(dir: &Path) -> Result<Option<Loaded<Autosave>>> {
     let path = dir.join(AUTOSAVE_FILE);
     if !path.exists() {
@@ -209,10 +243,14 @@ pub fn restore_autosave(dir: &Path) -> Result<Option<Loaded<Autosave>>> {
         }
         Err(err) => {
             let bad = dir.join(BAD_AUTOSAVE_FILE);
-            let _ = std::fs::remove_file(&bad);
-            std::fs::rename(&path, &bad)
-                .with_context(|| format!("could not move {} aside", path.display()))?;
-            Err(err)
+            let _ = fs::remove_file(&bad);
+            match fs::rename(&path, &bad) {
+                Ok(()) => Err(err),
+                Err(moved) => Err(err.context(LeftInPlace(format!(
+                    "could not move {} aside: {moved}",
+                    path.display()
+                )))),
+            }
         }
     }
 }
@@ -446,6 +484,33 @@ mod tests {
             "the newest bad file replaces the older one"
         );
         assert!(restore_autosave(&dir).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_bad_autosave_that_cannot_be_moved_is_reported_as_left_in_place() {
+        let dir = save::temp_dir("stuck-autosave");
+        std::fs::write(dir.join(AUTOSAVE_FILE), "{ broken").unwrap();
+        // A folder with something in it can't be removed or renamed over.
+        let bad = dir.join(BAD_AUTOSAVE_FILE);
+        std::fs::create_dir(&bad).unwrap();
+        std::fs::write(bad.join("keep"), "x").unwrap();
+        let err = restore_autosave(&dir).unwrap_err();
+        assert!(err.downcast_ref::<LeftInPlace>().is_some(), "{err:#}");
+        assert!(
+            format!("{err:#}").contains("this isn't a JSON file"),
+            "{err:#}"
+        );
+        assert!(dir.join(AUTOSAVE_FILE).exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn only_one_window_holds_the_session_lock() {
+        let dir = save::temp_dir("lock").join("data");
+        let first = lock_session(&dir).expect("the first window takes it");
+        assert!(lock_session(&dir).is_none(), "a second window is refused");
+        drop(first);
+        assert!(lock_session(&dir).is_some(), "free again once released");
     }
 
     #[test]
