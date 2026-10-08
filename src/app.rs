@@ -350,9 +350,9 @@ impl State {
     fn draw_canvas_frame(&mut self) {
         let paused = self.ui.paused;
         if !paused {
-            let period = self.clock.rate().period();
-            self.time += period;
-            self.motion.advance(period as f32);
+            let rate = self.clock.rate();
+            self.time += rate.period();
+            self.motion.advance(rate.period_ticks());
         }
         self.frame_params = self.motion.frame();
         let mut encoder = self.device.create_command_encoder(&Default::default());

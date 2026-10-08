@@ -3,12 +3,21 @@
 
 use crate::curve::CurveRef;
 use crate::params::Params;
+use crate::rate::TICKS_PER_SECOND;
 
 pub const MAX_CUES: usize = 5;
 /// The manual's thumbwheels count film frames.
 pub const FRAMES_PER_SECOND: f32 = 24.0;
 /// Highest start frame (3-digit thumbwheel) and longest ramp.
 pub const MAX_FRAME: u32 = 999;
+/// Animation-time ticks per sequence frame: exact, so cues start on the right canvas
+/// frame at every program frame rate.
+const TICKS_PER_FRAME: i64 = TICKS_PER_SECOND / FRAMES_PER_SECOND as i64;
+
+/// Ticks from Run to sequence frame `frame`.
+fn frame_ticks(frame: u32) -> i64 {
+    i64::from(frame) * TICKS_PER_FRAME
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cue {
@@ -48,8 +57,8 @@ pub struct Sequence {
     pub selected: usize,
     pub looping: bool,
     running: bool,
-    /// Frames since Run.
-    clock: f32,
+    /// Ticks of animation time since Run (see [`TICKS_PER_SECOND`]).
+    clock: i64,
     /// The last cue fully reached.
     base: usize,
     /// The cue currently being ramped toward.
@@ -68,7 +77,7 @@ impl Sequence {
             selected: 0,
             looping: false,
             running: false,
-            clock: 0.0,
+            clock: 0,
             base: 0,
             target: None,
         }
@@ -86,8 +95,9 @@ impl Sequence {
         self.running
     }
 
+    /// Sequence frames since Run.
     pub fn clock_frames(&self) -> f32 {
-        self.clock
+        (self.clock as f64 / TICKS_PER_FRAME as f64) as f32
     }
 
     /// Appends a copy of the selected cue two seconds after the last one.
@@ -151,7 +161,7 @@ impl Sequence {
 
     /// Instantly back to cue 1, frame 0 (keeps running if it was).
     pub fn reset(&mut self) {
-        self.clock = 0.0;
+        self.clock = 0;
         self.base = 0;
         self.target = None;
     }
@@ -182,19 +192,20 @@ impl Sequence {
 
     fn progress(&self, t: usize) -> f32 {
         let cue = &self.cues[t];
-        (self.clock - cue.start_frame as f32) / cue.duration_frames as f32
+        let elapsed = self.clock - frame_ticks(cue.start_frame);
+        (elapsed as f64 / frame_ticks(cue.duration_frames) as f64) as f32
     }
 
-    /// Advances by `dt` seconds of animation time.
-    pub fn advance(&mut self, dt: f32) -> Vec<SeqEvent> {
+    /// Advances by `ticks` of animation time (see [`TICKS_PER_SECOND`]).
+    pub fn advance(&mut self, ticks: i64) -> Vec<SeqEvent> {
         let mut events = Vec::new();
         if !self.running {
             return events;
         }
-        self.clock += dt * FRAMES_PER_SECOND;
+        self.clock += ticks;
         loop {
             let next = self.target.map_or(self.base + 1, |t| t + 1);
-            if next >= self.cues.len() || self.clock < self.cues[next].start_frame as f32 {
+            if next >= self.cues.len() || self.clock < frame_ticks(self.cues[next].start_frame) {
                 break;
             }
             if let Some(t) = self.target {
@@ -213,7 +224,7 @@ impl Sequence {
             events.push(SeqEvent::RampFinished);
         }
         let last = &self.cues[self.cues.len() - 1];
-        let end = (last.start_frame + last.duration_frames) as f32;
+        let end = frame_ticks(last.start_frame + last.duration_frames);
         if self.looping
             && self.target.is_none()
             && self.base == self.cues.len() - 1
@@ -232,6 +243,11 @@ impl Sequence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ticks in `seconds` of animation time.
+    fn secs(seconds: f64) -> i64 {
+        (seconds * TICKS_PER_SECOND as f64).round() as i64
+    }
 
     /// Three cues at frames 0, 24 and 72, each ramp 24 frames, zoom 1, 2, 3.
     fn three_cues() -> Sequence {
@@ -254,23 +270,66 @@ mod tests {
     }
 
     #[test]
+    fn cues_start_on_the_exact_canvas_frame_at_every_rate() {
+        use crate::rate::FrameRate;
+        for rate in FrameRate::ALL {
+            for start in [1, 24, 25, 48, 100, 999] {
+                let mut s = Sequence::new(Params::default());
+                s.add_cue();
+                s.set_start_frame(1, start);
+                s.run();
+                // The first canvas frame at or after the cue's start time.
+                let period = rate.period_ticks();
+                let due = (frame_ticks(start) + period - 1) / period;
+                let mut frame = 0;
+                loop {
+                    frame += 1;
+                    if s.advance(period).contains(&SeqEvent::RampStarted) {
+                        break;
+                    }
+                    assert!(frame < due, "{} cue at {start}: late", rate.label());
+                }
+                assert_eq!(frame, due, "{} cue at {start}: early", rate.label());
+            }
+        }
+    }
+
+    #[test]
+    fn changing_the_frame_rate_mid_run_keeps_time() {
+        use crate::rate::FrameRate;
+        let mut s = three_cues();
+        s.run();
+        // Half a second at 24 fps, then just short of another half second at 30 fps.
+        for _ in 0..12 {
+            assert!(s.advance(FrameRate::whole(24).period_ticks()).is_empty());
+        }
+        for _ in 0..14 {
+            assert!(s.advance(FrameRate::whole(30).period_ticks()).is_empty());
+        }
+        // Frame 24 (exactly 1 s) is where cue 2 starts.
+        let events = s.advance(FrameRate::whole(30).period_ticks());
+        assert_eq!(events, vec![SeqEvent::RampStarted]);
+        assert_eq!(s.clock_frames(), 24.0);
+    }
+
+    #[test]
     fn stopped_sequence_shows_selected_cue() {
         let mut s = three_cues();
         s.selected = 2;
         assert_eq!(zoom_from(s.view()), (3.0, None));
-        assert!(s.advance(1.0).is_empty());
+        assert!(s.advance(secs(1.0)).is_empty());
     }
 
     #[test]
     fn cues_ramp_in_at_their_start_frames() {
         let mut s = three_cues();
         s.run();
-        assert_eq!(s.advance(0.5), vec![]); // frame 12: resting on cue 1
+        assert_eq!(s.advance(secs(0.5)), vec![]); // frame 12: resting on cue 1
         assert_eq!(zoom_from(s.view()), (1.0, None));
-        assert_eq!(s.advance(0.5), vec![SeqEvent::RampStarted]); // frame 24
-        assert_eq!(s.advance(0.5), vec![]); // frame 36: halfway to cue 2
+        assert_eq!(s.advance(secs(0.5)), vec![SeqEvent::RampStarted]); // frame 24
+        assert_eq!(s.advance(secs(0.5)), vec![]); // frame 36: halfway to cue 2
         assert_eq!(zoom_from(s.view()), (1.0, Some(0.5)));
-        assert_eq!(s.advance(0.5), vec![SeqEvent::RampFinished]); // frame 48
+        assert_eq!(s.advance(secs(0.5)), vec![SeqEvent::RampFinished]); // frame 48
         assert_eq!(zoom_from(s.view()), (2.0, None));
     }
 
@@ -279,8 +338,8 @@ mod tests {
         let mut s = three_cues();
         s.cues[1].duration_frames = 100; // still ramping when cue 3 starts at 72
         s.run();
-        s.advance(1.0); // frame 24: ramp to cue 2 starts
-        let events = s.advance(2.0); // frame 72
+        s.advance(secs(1.0)); // frame 24: ramp to cue 2 starts
+        let events = s.advance(secs(2.0)); // frame 72
         assert_eq!(events, vec![SeqEvent::RampFinished, SeqEvent::RampStarted]);
         assert_eq!(zoom_from(s.view()), (2.0, Some(0.0)));
     }
@@ -289,7 +348,7 @@ mod tests {
     fn reset_returns_to_cue_one() {
         let mut s = three_cues();
         s.run();
-        s.advance(3.0);
+        s.advance(secs(3.0));
         s.reset();
         assert_eq!(s.clock_frames(), 0.0);
         assert_eq!(zoom_from(s.view()), (1.0, None));
@@ -303,7 +362,7 @@ mod tests {
         s.run();
         let mut events = Vec::new();
         for _ in 0..5 {
-            events.extend(s.advance(1.0)); // frames 24..120; last cue ends at 96
+            events.extend(s.advance(secs(1.0))); // frames 24..120; last cue ends at 96
         }
         assert!(events.contains(&SeqEvent::Restarted));
     }
@@ -325,7 +384,7 @@ mod tests {
         s.looping = true;
         s.run();
         // Last cue ends at frame 96; 4.125 s is frame 99, three frames past it.
-        let events = s.advance(99.0 / FRAMES_PER_SECOND);
+        let events = s.advance(frame_ticks(99));
         assert!(events.contains(&SeqEvent::Restarted));
         assert_eq!(s.clock_frames(), 3.0);
         assert_eq!(zoom_from(s.view()), (1.0, None));

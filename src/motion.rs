@@ -4,6 +4,7 @@
 use crate::blend::{Clocks, FrameParams, blend};
 use crate::curve::CurveLibrary;
 use crate::params::Params;
+use crate::rate::TICKS_PER_SECOND;
 use crate::sequence::{SeqEvent, SeqView, Sequence};
 use crate::transition::{AbEvent, AbState};
 
@@ -141,8 +142,10 @@ impl Motion {
         }
     }
 
-    /// Advances ramps and phase clocks by `dt` seconds of animation time.
-    pub fn advance(&mut self, dt: f32) {
+    /// Advances ramps and phase clocks by `ticks` of animation time (see
+    /// [`TICKS_PER_SECOND`]); the app passes one canvas frame period.
+    pub fn advance(&mut self, ticks: i64) {
+        let dt = (ticks as f64 / TICKS_PER_SECOND as f64) as f32;
         match self.mode {
             Mode::Live => self.rest.advance(&self.ab.banks[self.ab.on_air], dt),
             Mode::Transition => {
@@ -158,7 +161,7 @@ impl Motion {
                 let seq = self
                     .sequence
                     .get_or_insert_with(|| Sequence::new(self.ab.banks[self.ab.on_air]));
-                for event in seq.advance(dt) {
+                for event in seq.advance(ticks) {
                     match event {
                         SeqEvent::RampStarted => self.target = self.rest,
                         SeqEvent::RampFinished => self.rest = self.target,
@@ -255,6 +258,11 @@ impl Motion {
 mod tests {
     use super::*;
 
+    /// Ticks in `seconds` of animation time.
+    fn secs(seconds: f64) -> i64 {
+        (seconds * TICKS_PER_SECOND as f64).round() as i64
+    }
+
     #[test]
     fn live_mode_has_no_preview() {
         let m = Motion::new(Params::default());
@@ -279,9 +287,9 @@ mod tests {
         m.set_mode(Mode::Transition);
         m.editable().warp.zoom = 3.0;
         m.trigger();
-        m.advance(1.0);
+        m.advance(secs(1.0));
         assert_eq!(m.preview().unwrap().source, PreviewSource::Bank(1));
-        m.advance(1.5); // the ramp finishes and B goes on air
+        m.advance(secs(1.5)); // the ramp finishes and B goes on air
         let preview = m.preview().unwrap();
         assert_eq!(preview.source, PreviewSource::Bank(0));
         assert_eq!(preview.frame.warp.zoom, 1.0);
@@ -306,13 +314,13 @@ mod tests {
     fn preview_starts_from_the_output_phases_then_runs_on_its_own() {
         let mut m = Motion::new(Params::default());
         m.editable().warp.oscillators[0].phase_speed = 0.4;
-        m.advance(0.7);
+        m.advance(secs(0.7));
         m.set_mode(Mode::Transition);
-        m.advance(0.0); // the preview appears
+        m.advance(secs(0.0)); // the preview appears
         let phase = |f: &FrameParams| f.warp.oscillators[0].phase;
         assert_eq!(phase(&m.preview().unwrap().frame), phase(&m.frame()));
         m.editable().warp.oscillators[0].phase_speed = 0.0;
-        m.advance(0.5);
+        m.advance(secs(0.5));
         let still = phase(&m.preview().unwrap().frame);
         let moved = phase(&m.frame());
         // The output moved 0.4 × 0.5 = 0.2 cycles while the preview held still.
@@ -334,9 +342,9 @@ mod tests {
         m.editable().warp.zoom = 3.0;
         assert_eq!(m.frame().warp.zoom, 1.0, "edits stay off air");
         m.trigger();
-        m.advance(1.0); // halfway through the default 2 s S-curve
+        m.advance(secs(1.0)); // halfway through the default 2 s S-curve
         assert!((m.frame().warp.zoom - 2.0).abs() < 1e-5);
-        m.advance(1.0);
+        m.advance(secs(1.0));
         assert_eq!(m.frame().warp.zoom, 3.0);
         assert_eq!(m.editable().warp.zoom, 1.0, "now editing the other bank");
     }
@@ -355,11 +363,11 @@ mod tests {
         let mut m = Motion::new(Params::default());
         m.set_mode(Mode::Transition);
         m.editable().warp.oscillators[0].phase_speed = 2.0;
-        m.advance(0.3);
+        m.advance(secs(0.3));
         m.trigger();
-        m.advance(1.99);
+        m.advance(secs(1.99));
         let before = m.frame().warp.oscillators[0].phase;
-        m.advance(0.02); // finishes; the destination's clocks take over
+        m.advance(secs(0.02)); // finishes; the destination's clocks take over
         let after = m.frame().warp.oscillators[0].phase;
         let step = (after - before).rem_euclid(1.0);
         assert!(step < 0.1, "phase jumped by {step}");
@@ -379,9 +387,9 @@ mod tests {
         let mut m = Motion::new(Params::default());
         m.set_mode(Mode::Transition);
         m.editable().warp.oscillators[0].phase_speed = 2.0;
-        m.advance(0.3);
+        m.advance(secs(0.3));
         m.trigger();
-        m.advance(1.0); // halfway through the ramp
+        m.advance(secs(1.0)); // halfway through the ramp
         m.cut();
         assert_eq!(m.ab.on_air, 1);
         // The destination's clock (0.15 at the trigger, then 2 cycles/s) is on screen.
@@ -389,7 +397,7 @@ mod tests {
         assert!(phase_step(osc0_phase(&m), expected(1.0)).abs() < 1e-3);
         let mut last = osc0_phase(&m);
         for _ in 0..100 {
-            m.advance(0.01);
+            m.advance(secs(0.01));
             let now = osc0_phase(&m);
             assert!(phase_step(last, now).abs() < 0.1, "phase jumped after cut");
             last = now;
@@ -410,7 +418,7 @@ mod tests {
         let mut last = osc0_phase(&m);
         for _ in 0..250 {
             // Frames 0..60: crosses RampStarted (24) and RampFinished (48).
-            m.advance(0.01);
+            m.advance(secs(0.01));
             let now = osc0_phase(&m);
             assert!(phase_step(last, now).abs() < 0.1, "phase jumped");
             last = now;
@@ -426,15 +434,15 @@ mod tests {
         let mut m = Motion::new(Params::default());
         m.set_mode(Mode::Transition);
         m.editable().warp.oscillators[0].phase_speed = 2.0;
-        m.advance(0.3);
+        m.advance(secs(0.3));
         m.trigger();
-        m.advance(0.5);
+        m.advance(secs(0.5));
         m.trigger(); // reverse
         assert!(!m.ab.ramp().unwrap().forward);
         let mut last = osc0_phase(&m);
         let mut steps = 0;
         while m.ab.ramp().is_some() {
-            m.advance(0.01);
+            m.advance(secs(0.01));
             let now = osc0_phase(&m);
             assert!(phase_step(last, now).abs() < 0.1, "phase jumped");
             last = now;
@@ -473,8 +481,8 @@ mod tests {
         seq.set_start_frame(1, 24);
         seq.set_duration(1, 24);
         seq.run();
-        m.advance(1.0); // ramp to cue 2 starts at frame 24
-        m.advance(1.0); // and ends at frame 48
+        m.advance(secs(1.0)); // ramp to cue 2 starts at frame 24
+        m.advance(secs(1.0)); // and ends at frame 48
         assert_eq!(m.frame().warp.zoom, 2.0);
     }
 }

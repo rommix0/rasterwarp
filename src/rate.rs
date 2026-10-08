@@ -1,6 +1,10 @@
 //! The program frame rate: every canvas frame advances animation by exactly one period,
 //! and recordings run at the same rate.
 
+/// Animation-time ticks per second. Every rate's frame period and a sequence's 1/24 s
+/// frame are whole numbers of ticks, so time counted in ticks never drifts.
+pub const TICKS_PER_SECOND: i64 = 120_000;
+
 /// A frame rate as an exact fraction, `num / den` frames per second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrameRate {
@@ -42,6 +46,11 @@ impl FrameRate {
     /// Seconds per frame.
     pub fn period(self) -> f64 {
         f64::from(self.den) / f64::from(self.num)
+    }
+
+    /// Ticks per frame (see [`TICKS_PER_SECOND`]); exact for every rate in [`Self::ALL`].
+    pub fn period_ticks(self) -> i64 {
+        TICKS_PER_SECOND * i64::from(self.den) / i64::from(self.num)
     }
 
     /// Seconds of `frames` frames.
@@ -106,6 +115,23 @@ mod tests {
                 "60 fps"
             ]
         );
+    }
+
+    #[test]
+    fn every_frame_period_is_a_whole_number_of_ticks() {
+        for rate in FrameRate::ALL {
+            let ticks = rate.period_ticks();
+            assert_eq!(
+                ticks * i64::from(rate.num),
+                TICKS_PER_SECOND * i64::from(rate.den),
+                "{}",
+                rate.label()
+            );
+        }
+        assert_eq!(FrameRate::ntsc(24).period_ticks(), 5005);
+        assert_eq!(FrameRate::whole(60).period_ticks(), 2000);
+        // A sequence's 1/24 s frame is whole too.
+        assert_eq!(TICKS_PER_SECOND % 24, 0);
     }
 
     #[test]
