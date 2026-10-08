@@ -19,12 +19,14 @@ use crate::canvas::{self, CanvasChoice};
 use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
 use crate::clock::{CanvasClock, Pacing};
+use crate::files_ui::FileActions;
 use crate::gpu;
-use crate::motion::Motion;
+use crate::motion::{Mode, Motion};
 use crate::params::Params;
 use crate::passes::Renderer;
+use crate::presets;
 use crate::preview::PreviewView;
-use crate::save::{self, Settings};
+use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
 use crate::session::{self, Autosave, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
@@ -84,7 +86,7 @@ impl ApplicationHandler for App {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) => state.resize(size),
-            WindowEvent::DroppedFile(path) => state.load_source(&path),
+            WindowEvent::DroppedFile(path) => state.dropped(&path),
             // Space triggers a transition unless egui is using the keyboard (e.g. a text field).
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed
@@ -302,6 +304,7 @@ impl State {
         if let Some(path) = initial_image {
             self.load_source(path);
         }
+        self.list_presets();
     }
 
     /// Makes `project` the running session, at rest: its motion, canvas size, frame rate
@@ -411,6 +414,248 @@ impl State {
         if size.width > 0 && size.height > 0 {
             self.surface.configure(&self.device, &self.config);
         }
+    }
+
+    /// Opens a dropped preset or project, or loads a dropped image as the source.
+    fn dropped(&mut self, path: &Path) {
+        let is = |ext: &str| {
+            path.extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+        };
+        if is(PRESET_EXTENSION) {
+            self.load_preset(path);
+        } else if is(PROJECT_EXTENSION) {
+            self.open_project(Some(path));
+        } else {
+            self.load_source(path);
+        }
+    }
+
+    /// The project file's name, or "Untitled".
+    fn project_name(&self) -> String {
+        self.project_file
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or_else(|| "Untitled".into(), |s| s.to_string_lossy().into_owned())
+    }
+
+    fn file_actions(&mut self, actions: FileActions) {
+        if actions.save_project {
+            self.save_project(false);
+        }
+        if actions.save_project_as {
+            self.save_project(true);
+        }
+        if actions.open_project {
+            self.open_project(None);
+        }
+        if actions.new_project {
+            self.new_project();
+        }
+        if let Some(name) = actions.save_preset {
+            self.save_preset(&name);
+        }
+        if let Some(name) = actions.load_preset {
+            self.load_preset(&presets::path(&self.ui.presets_folder, &name));
+        }
+        if let Some((from, to)) = actions.rename_preset {
+            let renamed = presets::rename(&self.ui.presets_folder, &from, &to);
+            self.report(renamed);
+            self.list_presets();
+        }
+        if let Some(name) = actions.delete_preset
+            && self.confirm(&format!("Delete preset {name}?"))
+        {
+            let deleted = presets::delete(&self.ui.presets_folder, &name);
+            self.report(deleted);
+            self.list_presets();
+        }
+        if actions.choose_presets_folder {
+            self.choose_presets_folder();
+        }
+        if actions.list_presets {
+            self.list_presets();
+        }
+    }
+
+    /// Shows a file operation's error, or clears the last one.
+    fn report(&mut self, result: Result<()>) {
+        self.ui.file_note = None;
+        self.ui.file_error = result.err().map(|err| {
+            log::warn!("{err:#}");
+            format!("{err:#}")
+        });
+    }
+
+    /// Asks a yes/no question in a system dialog.
+    fn confirm(&mut self, question: &str) -> bool {
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Rasterwarp")
+            .set_description(question)
+            .set_buttons(rfd::MessageButtons::YesNo)
+            .set_parent(&*self.window)
+            .show();
+        // The dialog blocks the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+        answer == rfd::MessageDialogResult::Yes
+    }
+
+    /// Before the session is replaced: if it has unsaved changes, asks whether to save
+    /// them (Yes saves, No discards). False means don't go on: the user cancelled, or
+    /// saving was cancelled or failed.
+    fn may_replace_session(&mut self) -> bool {
+        if !self.unsaved(&self.project()) {
+            return true;
+        }
+        let answer = rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Warning)
+            .set_title("Unsaved changes")
+            .set_description(format!("Save changes to {}?", self.project_name()))
+            .set_buttons(rfd::MessageButtons::YesNoCancel)
+            .set_parent(&*self.window)
+            .show();
+        self.clock.reanchor(self.seconds());
+        match answer {
+            rfd::MessageDialogResult::Yes => self.save_project(false),
+            rfd::MessageDialogResult::No => true,
+            _ => false,
+        }
+    }
+
+    /// Saves the session to its project file, asking for one when Untitled or when
+    /// `ask` (Save as). Returns whether it saved.
+    fn save_project(&mut self, ask: bool) -> bool {
+        let path = match &self.project_file {
+            Some(path) if !ask => path.clone(),
+            _ => match self.ask_project_path() {
+                Some(path) => path,
+                None => return false,
+            },
+        };
+        let project = self.project();
+        let saved = session::save_project(&path, &project);
+        let ok = saved.is_ok();
+        self.report(saved);
+        if ok {
+            self.project_file = Some(path);
+            self.saved = Some(project);
+        }
+        ok
+    }
+
+    fn ask_project_path(&mut self) -> Option<PathBuf> {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Save project")
+            .add_filter("Rasterwarp project", &[PROJECT_EXTENSION])
+            .set_file_name(format!("{}.{PROJECT_EXTENSION}", self.project_name()));
+        if let Some(dir) = self.project_file.as_deref().and_then(Path::parent) {
+            dialog = dialog.set_directory(dir);
+        }
+        let picked = dialog.save_file();
+        self.clock.reanchor(self.seconds());
+        let path = picked?;
+        // "show" becomes "show.rwproject"; "show.v2" becomes "show.v2.rwproject".
+        let has_extension = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXTENSION));
+        Some(if has_extension {
+            path
+        } else {
+            let mut named = path.into_os_string();
+            named.push(format!(".{PROJECT_EXTENSION}"));
+            PathBuf::from(named)
+        })
+    }
+
+    /// Opens a project (asking which when `path` is none), after the unsaved-changes
+    /// check. Not while recording: the canvas can't change then.
+    fn open_project(&mut self, path: Option<&Path>) {
+        if self.recorder.is_some() || !self.may_replace_session() {
+            return;
+        }
+        let path = match path {
+            Some(path) => path.to_path_buf(),
+            None => {
+                let picked = rfd::FileDialog::new()
+                    .set_title("Open project")
+                    .add_filter("Rasterwarp project", &[PROJECT_EXTENSION])
+                    .pick_file();
+                self.clock.reanchor(self.seconds());
+                match picked {
+                    Some(path) => path,
+                    None => return,
+                }
+            }
+        };
+        match session::load_project(&path) {
+            Ok(loaded) => {
+                self.apply_project(&loaded.value);
+                self.project_file = Some(absolute(&path));
+                self.saved = Some(self.project());
+                self.ui.file_error = None;
+                self.ui.file_note = loaded.newer.then(|| save::NEWER_NOTE.into());
+            }
+            Err(err) => self.report(Err(err)),
+        }
+    }
+
+    /// Starts over with the default session, Untitled.
+    fn new_project(&mut self) {
+        if self.recorder.is_some() || !self.may_replace_session() {
+            return;
+        }
+        self.apply_project(&Project::default());
+        self.project_file = None;
+        self.saved = Some(self.project());
+        self.report(Ok(()));
+    }
+
+    /// Saves the edited look as preset `name`, asking before replacing one.
+    fn save_preset(&mut self, name: &str) {
+        let folder = self.ui.presets_folder.clone();
+        if presets::exists(&folder, name) && !self.confirm(&format!("Replace preset {name}?")) {
+            return;
+        }
+        let saved = presets::save(&folder, name, self.motion.editable());
+        self.report(saved);
+        self.list_presets();
+    }
+
+    /// Loads a preset into the edited look: on screen in Live mode, the off-air bank in
+    /// Transition mode, the selected cue in Sequence mode.
+    fn load_preset(&mut self, path: &Path) {
+        match save::load_preset(path) {
+            Ok(loaded) => {
+                *self.motion.editable() = loaded.value;
+                if self.motion.mode() == Mode::Live {
+                    // The picture cuts to the preset.
+                    self.renderer.reset_motion();
+                }
+                self.ui.file_error = None;
+                self.ui.file_note = loaded.newer.then(|| save::NEWER_NOTE.into());
+            }
+            Err(err) => self.report(Err(err)),
+        }
+    }
+
+    fn choose_presets_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Presets folder");
+        if let Ok(start) = std::path::absolute(&self.ui.presets_folder)
+            && start.is_dir()
+        {
+            dialog = dialog.set_directory(start);
+        }
+        if let Some(picked) = dialog.pick_folder() {
+            self.ui.presets_folder = picked;
+            self.list_presets();
+        }
+        // The dialog blocks the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
+    fn list_presets(&mut self) {
+        self.ui.files.presets = presets::list(&self.ui.presets_folder);
     }
 
     /// Loads a dropped (or command-line) image as the source.
@@ -682,6 +927,8 @@ impl State {
                 label: p.source.label(),
             });
         self.ui.late = self.clock.late();
+        self.ui.files.project_name = self.project_name();
+        self.ui.files.unsaved = self.unsaved(&self.project());
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
         let egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
@@ -733,6 +980,7 @@ impl State {
         if actions.clear_feedback {
             self.clear_feedback();
         }
+        self.file_actions(actions.files);
         if self.last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
             self.autosave();
         }

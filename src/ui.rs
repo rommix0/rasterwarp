@@ -10,6 +10,7 @@ use crate::capture::encode::VideoFormat;
 use crate::capture::recorder::{RecordSettings, RecordStatus};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
+use crate::files_ui::{self, FileActions, FilesUi};
 use crate::motion::{Mode, Motion};
 use crate::params::{
     Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, even_thresholds, ranges,
@@ -43,6 +44,7 @@ pub struct UiState {
     pub editing_curve: Option<u32>,
     pub canvas: CanvasChoice,
     pub capture: CaptureUi,
+    pub files: FilesUi,
 }
 
 /// The capture controls and what the current or last recording reported.
@@ -78,6 +80,7 @@ pub struct UiActions {
     pub choose_folder: bool,
     pub choose_background: bool,
     pub clear_background: bool,
+    pub files: FileActions,
 }
 
 pub fn draw(
@@ -87,6 +90,7 @@ pub fn draw(
     preview: Option<&PreviewOverlay>,
 ) -> UiActions {
     let mut actions = UiActions::default();
+    files_ui::shortcuts(ui.ctx(), &mut actions.files);
     egui::Panel::left("controls")
         .resizable(true)
         .default_size(320.0)
@@ -109,7 +113,7 @@ pub fn draw(
                 if let Some(note) = &state.file_note {
                     ui.label(note);
                 }
-                ui.label("Drop a PNG/JPG onto the window to load it.");
+                ui.label("Drop an image, preset or project onto the window.");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut state.paused, "Pause");
                     ui.checkbox(&mut state.show_preview, "Show preview");
@@ -119,10 +123,17 @@ pub fn draw(
                     }
                 });
                 let recording = state.capture.status.is_some();
+                files_ui::project_row(ui, &state.files, recording, &mut actions.files);
                 capture_section(ui, &mut state.capture, &mut actions);
                 rate_section(ui, &mut state.rate, recording);
                 canvas_section(ui, &mut state.canvas, recording, &mut actions);
                 mode_section(ui, motion);
+                files_ui::presets_section(
+                    ui,
+                    &mut state.files,
+                    &state.presets_folder,
+                    &mut actions.files,
+                );
                 curves_section(ui, &mut motion.curves, state);
                 let params = motion.editable();
                 warp_section(ui, params);
@@ -571,8 +582,10 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
             });
             let used = c.levels as usize - 1;
             for k in 0..used {
+                // Shown to 3 decimals but not rounded: a slider that rounds its value
+                // changes the look just by being drawn (and it would always look unsaved).
                 let slider = Slider::new(&mut c.thresholds[k], ranges::THRESHOLD)
-                    .max_decimals(3)
+                    .custom_formatter(|v, _| format!("{v:.3}"))
                     .text(format!("level {} from", k + 2));
                 if ui.add(slider).changed() {
                     // A threshold can't pass its neighbours.
@@ -591,7 +604,12 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
             ui.add(Slider::new(&mut c.cycle_speed, ranges::CYCLE_SPEED).text("cycle speed"));
             ui.horizontal_wrapped(|ui| {
                 for color in &mut c.palette {
-                    ui.color_edit_button_rgb(color);
+                    // The button edits a copy: its color conversion isn't exact, and only
+                    // a real edit may change the look.
+                    let mut edited = *color;
+                    if ui.color_edit_button_rgb(&mut edited).changed() {
+                        *color = edited;
+                    }
                 }
             });
         });

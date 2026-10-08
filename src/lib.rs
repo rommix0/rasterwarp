@@ -7,6 +7,7 @@ pub mod capture;
 pub mod clock;
 pub mod curve;
 pub mod curve_editor;
+pub mod files_ui;
 pub mod fringe;
 pub mod gpu;
 pub mod motion;
