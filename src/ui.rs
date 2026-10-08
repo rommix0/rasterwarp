@@ -12,6 +12,7 @@ use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::motion::{Mode, Motion};
 use crate::params::{Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, ranges};
+use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
 use crate::transition::{AbState, DURATION};
 
@@ -21,8 +22,12 @@ pub struct UiState {
     pub paused: bool,
     /// Show the off-air preview in Transition and Sequence modes.
     pub show_preview: bool,
-    /// Smoothed frame time in milliseconds.
+    /// Smoothed time between screen refreshes in milliseconds.
     pub frame_ms: f32,
+    /// The program frame rate chosen in the panel.
+    pub rate: FrameRate,
+    /// Canvas frames skipped so far because the app fell behind.
+    pub late: u64,
     pub source_info: String,
     pub load_error: Option<String>,
     /// The user curve open in the curve editor.
@@ -94,9 +99,10 @@ pub fn draw(
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Rasterwarp");
                 ui.label(format!(
-                    "{:.2} ms ({:.0} fps)",
-                    state.frame_ms,
-                    1000.0 / state.frame_ms.max(0.001)
+                    "{} · display {:.0} Hz · {} late",
+                    state.rate.label(),
+                    1000.0 / state.frame_ms.max(0.001),
+                    state.late
                 ));
                 ui.label(&state.source_info);
                 if let Some(err) = &state.load_error {
@@ -112,7 +118,8 @@ pub fn draw(
                     }
                 });
                 let recording = state.capture.status.is_some();
-                capture_section(ui, &mut state.capture, state.frame_ms, &mut actions);
+                capture_section(ui, &mut state.capture, &mut actions);
+                rate_section(ui, &mut state.rate, recording);
                 canvas_section(ui, &mut state.canvas, recording, &mut actions);
                 mode_section(ui, motion);
                 curves_section(ui, &mut motion.curves, state);
@@ -143,7 +150,7 @@ fn preview_overlay(ctx: &egui::Context, preview: &PreviewOverlay) {
         });
 }
 
-fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, frame_ms: f32, actions: &mut UiActions) {
+fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions) {
     CollapsingHeader::new("Capture")
         .default_open(true)
         .show(ui, |ui| {
@@ -196,10 +203,10 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, frame_ms: f32, actions:
                     ));
                     if let Some(speed) = status.speed {
                         ui.label(format!("offline: {speed:.2}× realtime"));
-                    } else if frame_ms > 1000.0 / 60.0 * 1.05 {
+                    } else if status.dropped > 0 {
                         ui.colored_label(
                             egui::Color32::YELLOW,
-                            "Rendering is below 60 fps, so frames will be missing. Offline mode records every frame.",
+                            "The encoder can't keep up, so frames are being dropped. Offline mode records every frame.",
                         );
                     }
                 }
@@ -211,6 +218,22 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, frame_ms: f32, actions:
                 ui.colored_label(egui::Color32::LIGHT_RED, err);
             }
         });
+}
+
+/// The program frame rate: canvas frames and recordings both run at it.
+fn rate_section(ui: &mut Ui, rate: &mut FrameRate, recording: bool) {
+    ui.add_enabled_ui(!recording, |ui| {
+        ui.horizontal(|ui| {
+            ui.label("Frame rate");
+            ComboBox::from_id_salt("frame rate")
+                .selected_text(rate.label())
+                .show_ui(ui, |ui| {
+                    for choice in FrameRate::ALL {
+                        ui.selectable_value(rate, choice, choice.label());
+                    }
+                });
+        });
+    });
 }
 
 fn canvas_section(

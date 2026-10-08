@@ -1,5 +1,6 @@
-//! The windowed application: owns the GPU context, renderer, parameters and UI,
-//! and runs one frame per redraw.
+//! The windowed application: owns the GPU context, renderer, parameters and UI. Each
+//! screen refresh draws the canvas frames that are due at the program frame rate, then
+//! shows the newest one with the UI on top.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,15 +14,16 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::blend::FrameParams;
 use crate::canvas::{self, CanvasChoice};
 use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
+use crate::clock::{CanvasClock, Pacing};
 use crate::gpu;
 use crate::motion::Motion;
 use crate::params::Params;
 use crate::passes::Renderer;
 use crate::preview::PreviewView;
-use crate::rate::FrameRate;
 use crate::source::{self, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 
@@ -55,7 +57,11 @@ impl ApplicationHandler for App {
             return;
         }
         match State::new(event_loop, self.initial_image.as_deref()) {
-            Ok(state) => self.state = Some(state),
+            Ok(mut state) => {
+                // Startup took a while; the first canvas frame is due now.
+                state.clock.reanchor(state.seconds());
+                self.state = Some(state);
+            }
             Err(err) => {
                 self.error = Some(err);
                 event_loop.exit();
@@ -108,8 +114,17 @@ struct State {
     motion: Motion,
     recorder: Option<Recorder>,
     ui: UiState,
+    /// Paces canvas frames at the program frame rate.
+    clock: CanvasClock,
+    /// Wall-clock origin for the canvas clock.
+    epoch: Instant,
+    /// Animation time of the newest canvas frame.
     time: f64,
-    last_frame: Instant,
+    /// What the newest canvas frame was drawn with; refreshes with no new canvas frame
+    /// composite it again.
+    frame_params: FrameParams,
+    /// When the previous screen refresh started, for the display rate readout.
+    last_refresh: Instant,
 }
 
 impl State {
@@ -206,6 +221,9 @@ impl State {
             egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
         let preview =
             PreviewView::new(&device, &queue, &mut egui_renderer, canvas::DEFAULT, &image);
+        let motion = Motion::new(Params::default());
+        let frame_params = motion.frame();
+        let epoch = Instant::now();
 
         Ok(Self {
             window,
@@ -220,11 +238,14 @@ impl State {
             egui_ctx,
             egui_state,
             egui_renderer,
-            motion: Motion::new(Params::default()),
+            motion,
             recorder: None,
+            clock: CanvasClock::new(ui.rate, 0.0),
             ui,
+            epoch,
             time: 0.0,
-            last_frame: Instant::now(),
+            frame_params,
+            last_refresh: epoch,
         })
     }
 
@@ -251,24 +272,9 @@ impl State {
         }
     }
 
-    /// Advances animation time: by the frame time, or by exactly one frame period per
-    /// frame while recording offline.
-    fn advance_animation(&mut self, dt: f32) {
-        if self.ui.paused {
-            return;
-        }
-        let offline = self
-            .recorder
-            .as_ref()
-            .is_some_and(|r| r.mode() == CaptureMode::Offline);
-        // Clamp so a stall (e.g. dragging the window) doesn't make animation jump.
-        let step = if offline {
-            FrameRate::default().period() as f32
-        } else {
-            dt.min(0.1)
-        };
-        self.time += f64::from(step);
-        self.motion.advance(step);
+    /// Wall-clock seconds since the app started, for the canvas clock.
+    fn seconds(&self) -> f64 {
+        self.epoch.elapsed().as_secs_f64()
     }
 
     fn start_recording(&mut self) {
@@ -277,11 +283,11 @@ impl State {
             &self.device,
             &self.ui.capture.settings,
             self.renderer.size(),
-            FrameRate::default(),
+            self.clock.rate(),
         ) {
             Ok(recorder) => {
-                // Opening the encoder stalls; that must not count as animation time.
-                self.last_frame = Instant::now();
+                // Opening the encoder stalls; that must not make canvas frames late.
+                self.clock.reanchor(self.seconds());
                 self.ui.capture.error = None;
                 self.ui.capture.status = Some(recorder.status());
                 self.recorder = Some(recorder);
@@ -300,15 +306,16 @@ impl State {
         };
         self.ui.capture.status = None;
         let result = recorder.finish(&self.device);
-        // Flushing the encoder stalls; that must not count as animation time.
-        self.last_frame = Instant::now();
+        // Flushing the encoder stalls; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
         match result {
             Ok(status) => {
                 self.ui.capture.saved = Some(format!(
-                    "Saved {} ({:.1} s, {} frames, {} dropped)",
+                    "Saved {} ({:.1} s, {} frames at {}, {} dropped)",
                     status.path.display(),
                     status.seconds,
                     status.frames,
+                    self.clock.rate().label(),
                     status.dropped
                 ));
             }
@@ -330,12 +337,72 @@ impl State {
         if let Some(picked) = dialog.pick_folder() {
             *folder = picked;
         }
+        // The dialog blocks the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
+    /// Draws one canvas frame: advances animation by one frame period (unless paused),
+    /// draws the canvas and the preview, and records the frame if a recording is running.
+    fn draw_canvas_frame(&mut self) {
+        let paused = self.ui.paused;
+        if !paused {
+            let period = self.clock.rate().period();
+            self.time += period;
+            self.motion.advance(period as f32);
+        }
+        self.frame_params = self.motion.frame();
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.renderer.render_canvas(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &self.frame_params,
+            self.time as f32,
+        );
+        match self
+            .ui
+            .show_preview
+            .then(|| self.motion.preview())
+            .flatten()
+        {
+            Some(preview) => self.preview.render(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &preview,
+                self.time as f32,
+            ),
+            None => self.preview.hide(),
+        }
+        let mut capture_failed = false;
+        // A paused frame repeats the last one, so it isn't recorded.
+        if let Some(recorder) = &mut self.recorder
+            && !paused
+        {
+            let (device, queue, renderer) = (&self.device, &self.queue, &self.renderer);
+            let (frame_params, time) = (&self.frame_params, self.time as f32);
+            let captured = recorder.capture(device, &mut encoder, |encoder, view| {
+                renderer.composite_capture(device, queue, encoder, frame_params, time, view)
+            });
+            if let Err(err) = captured {
+                log::warn!("{err:#}");
+                capture_failed = true;
+            }
+        }
+        self.queue.submit([encoder.finish()]);
+        if let Some(recorder) = &mut self.recorder {
+            recorder.after_submit();
+            self.ui.capture.status = Some(recorder.status());
+            if capture_failed || recorder.finished_recording() {
+                self.stop_recording();
+            }
+        }
     }
 
     fn redraw(&mut self) {
         let now = Instant::now();
-        let dt = (now - self.last_frame).as_secs_f32();
-        self.last_frame = now;
+        let dt = (now - self.last_refresh).as_secs_f32();
+        self.last_refresh = now;
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
 
         if self.config.width == 0 || self.config.height == 0 {
@@ -354,8 +421,6 @@ impl State {
                 return;
             }
         };
-        // Animation moves only for frames that are drawn, so offline recordings stay exact.
-        self.advance_animation(dt);
         if let Some(recorder) = &mut self.recorder
             && let Err(err) = recorder.pump(&self.device)
         {
@@ -381,6 +446,7 @@ impl State {
                 size: self.preview.size(),
                 label: p.source.label(),
             });
+        self.ui.late = self.clock.late();
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
         let egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
@@ -416,53 +482,42 @@ impl State {
                 .resize(&self.device, &mut self.egui_renderer, size);
             self.ui.canvas.current = size;
         }
+        if self.ui.rate != self.clock.rate() && self.recorder.is_none() {
+            self.clock.set_rate(self.ui.rate, self.seconds());
+        }
         if actions.start_recording && self.recorder.is_none() {
             self.start_recording();
         }
-        let frame_params = self.motion.frame();
-        let mut encoder = self.device.create_command_encoder(&Default::default());
         if actions.clear_feedback {
+            let mut encoder = self.device.create_command_encoder(&Default::default());
             self.renderer.clear_feedback(&mut encoder);
             self.preview.clear_feedback(&mut encoder);
+            self.queue.submit([encoder.finish()]);
         }
-        self.renderer.render(
+
+        let offline = self
+            .recorder
+            .as_ref()
+            .is_some_and(|r| r.mode() == CaptureMode::Offline);
+        let pacing = if offline {
+            Pacing::Offline
+        } else {
+            Pacing::RealTime
+        };
+        for _ in 0..self.clock.due(self.seconds(), pacing) {
+            self.draw_canvas_frame();
+        }
+
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        self.renderer.composite(
             &self.device,
             &self.queue,
             &mut encoder,
-            &frame_params,
+            &self.frame_params,
             self.time as f32,
             &srgb_view,
             output_size,
         );
-        match self
-            .ui
-            .show_preview
-            .then(|| self.motion.preview())
-            .flatten()
-        {
-            Some(preview) => self.preview.render(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &preview,
-                self.time as f32,
-            ),
-            None => self.preview.hide(),
-        }
-        let mut capture_failed = false;
-        if let Some(recorder) = &mut self.recorder
-            && !self.ui.paused
-        {
-            let (device, queue, renderer, time) =
-                (&self.device, &self.queue, &self.renderer, self.time);
-            let captured = recorder.capture(device, &mut encoder, |encoder, view| {
-                renderer.composite_capture(device, queue, encoder, &frame_params, time as f32, view)
-            });
-            if let Err(err) = captured {
-                log::warn!("{err:#}");
-                capture_failed = true;
-            }
-        }
         let egui_commands = self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -493,13 +548,6 @@ impl State {
         }
         self.queue
             .submit(egui_commands.into_iter().chain([encoder.finish()]));
-        if let Some(recorder) = &mut self.recorder {
-            recorder.after_submit();
-            self.ui.capture.status = Some(recorder.status());
-            if capture_failed || recorder.finished_recording() {
-                self.stop_recording();
-            }
-        }
         self.window.pre_present_notify();
         self.queue.present(frame);
         for id in &egui_output.textures_delta.free {
