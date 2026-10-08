@@ -78,19 +78,30 @@ impl Renderer {
         self.pixel_scale = scale;
     }
 
+    /// Forgets the previous frame's deflection, so the next raster frame has no beam
+    /// speed. Call it when the picture jumps (a cut, a snapped cue): otherwise the jump
+    /// reads as a very fast beam and flashes the speed boost for one frame.
+    pub fn reset_motion(&mut self) {
+        self.previous = None;
+    }
+
     /// Rebuilds every canvas-sized target at `size`. The trails start out cleared.
     pub fn resize(&mut self, device: &wgpu::Device, size: (u32, u32)) {
         let (w, h) = size;
         self.size = size;
+        self.reset_motion(); // the aspect ratio may have changed
         self.warp = warp::WarpPass::new(device, w, h);
         self.colorize = colorize::ColorizePass::new(device, w, h);
         self.feedback = feedback::FeedbackPass::new(device, w, h);
         self.bloom = bloom::BloomPass::new(device, w, h);
     }
 
+    /// Shows a new source image. Its fit in the frame may differ, so this resets the beam
+    /// motion (see [`Renderer::reset_motion`]).
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {
         self.source = source::upload(device, queue, image).create_view(&Default::default());
         self.source_aspect = image.aspect();
+        self.reset_motion();
     }
 
     /// Sets what keyed levels show: an image, or black.

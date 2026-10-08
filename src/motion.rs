@@ -61,6 +61,8 @@ pub struct Motion {
     preview_shown: Option<PreviewSource>,
     /// Animation frames so far (calls to `advance`); seeds the line jitter.
     frames: u32,
+    /// The output jumped (a cut or a snapped cue) since the last `take_jump`.
+    jumped: bool,
 }
 
 impl Motion {
@@ -75,6 +77,7 @@ impl Motion {
             preview: Clocks::default(),
             preview_shown: None,
             frames: 0,
+            jumped: false,
         }
     }
 
@@ -143,6 +146,14 @@ impl Motion {
         if lands_on_target {
             self.rest = self.target;
         }
+        self.jumped = true;
+    }
+
+    /// Whether the output jumped instead of moving (a Transition cut, a sequence ramp cut
+    /// short by the next cue, a loop back to cue 1) since the last call. Ramps are real
+    /// motion and don't count.
+    pub fn take_jump(&mut self) -> bool {
+        std::mem::take(&mut self.jumped)
     }
 
     /// Advances ramps and phase clocks by `ticks` of animation time (see
@@ -173,7 +184,15 @@ impl Motion {
                 let seq = self
                     .sequence
                     .get_or_insert_with(|| Sequence::new(self.ab.banks[self.ab.on_air]));
-                for event in seq.advance(ticks) {
+                let events = seq.advance(ticks);
+                // A ramp snapped to its end by the next cue, or a loop back to cue 1.
+                let snapped = events
+                    .windows(2)
+                    .any(|w| w == [SeqEvent::RampFinished, SeqEvent::RampStarted]);
+                if snapped || events.contains(&SeqEvent::Restarted) {
+                    self.jumped = true;
+                }
+                for event in events {
                     match event {
                         SeqEvent::RampStarted => self.target = self.rest,
                         SeqEvent::RampFinished => self.rest = self.target,
@@ -387,6 +406,43 @@ mod tests {
         m.advance(secs(1.0));
         assert_eq!(m.frame().warp.zoom, 3.0);
         assert_eq!(m.editable().warp.zoom, 1.0, "now editing the other bank");
+    }
+
+    #[test]
+    fn a_cut_jumps_but_a_ramp_does_not() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Transition);
+        m.editable().warp.zoom = 3.0;
+        m.trigger();
+        m.advance(secs(1.0));
+        m.advance(secs(1.5)); // the ramp finishes
+        assert!(!m.take_jump(), "a ramp is real motion");
+        m.cut();
+        assert!(m.take_jump());
+        assert!(!m.take_jump(), "taking clears it");
+    }
+
+    #[test]
+    fn a_snapped_cue_and_a_loop_jump() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Sequence);
+        let seq = m.sequence_mut();
+        seq.add_cue(); // cue 2 at frame 48, ramp 48 frames
+        seq.add_cue(); // cue 3 at frame 96
+        seq.set_duration(1, 96); // cue 2's ramp is cut short by cue 3
+        seq.set_duration(2, 24);
+        seq.looping = true;
+        seq.run();
+        let frame = secs(1.0 / 24.0);
+        let mut jumps = Vec::new();
+        for f in 1..=120 {
+            m.advance(frame);
+            if m.take_jump() {
+                jumps.push(f);
+            }
+        }
+        // Cue 3 starts at frame 96 and snaps cue 2's ramp; it ends at 120 and loops.
+        assert_eq!(jumps, [96, 120]);
     }
 
     #[test]

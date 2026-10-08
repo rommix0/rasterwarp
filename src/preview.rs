@@ -120,6 +120,7 @@ impl PreviewView {
     ) {
         if self.shown != Some(preview.source) {
             self.renderer.clear_feedback(encoder);
+            self.renderer.reset_motion();
             self.shown = Some(preview.source);
         }
         let size = self.size();

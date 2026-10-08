@@ -393,6 +393,9 @@ impl State {
             self.motion.advance(rate.period_ticks());
         }
         self.frame_params = self.motion.frame();
+        if self.motion.take_jump() {
+            self.renderer.reset_motion();
+        }
         let mut encoder = self.device.create_command_encoder(&Default::default());
         self.renderer.render_canvas(
             &self.device,
