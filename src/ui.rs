@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Button, CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
+use crate::audio_ui::AudioUi;
 use crate::canvas::{CanvasChoice, PRESETS};
 use crate::capture::CaptureMode;
 use crate::capture::encode::VideoFormat;
@@ -57,6 +58,8 @@ pub struct UiState {
     pub files: FilesUi,
     /// MIDI devices and links.
     pub midi: MidiUi,
+    /// The sound source's state and settings.
+    pub audio: AudioUi,
 }
 
 /// The capture controls and what the current or last recording reported.

@@ -6,6 +6,12 @@ use crate::audio::{Beat, Signal, Signals};
 use crate::control::Target;
 use crate::params::table::SliderId;
 
+/// Whether a beat may fire `target`: anything a key fires, except the hand-beat actions
+/// (a beat tapping a beat would fire itself every frame).
+pub fn fires(target: Target) -> bool {
+    !target.continuous() && !matches!(target, Target::Action(a) if a.beat().is_some())
+}
+
 /// A follow signal moving a slider: the slider shows its base plus `depth × signal`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AudioLink {
@@ -61,10 +67,10 @@ impl AudioLinks {
         }
     }
 
-    /// Links `beat` to `target`, unless it already is. Sliders and the duration can't be
-    /// fired, so they are ignored.
+    /// Links `beat` to `target`, unless it already is. Sliders, the duration and the
+    /// hand-beat actions can't be fired, so they are ignored.
     pub fn fire_on(&mut self, beat: Beat, target: Target) {
-        if target.continuous() {
+        if !fires(target) {
             return;
         }
         let link = BeatLink { beat, target };
@@ -243,7 +249,7 @@ pub mod saved_beats {
     fn read(entry: &Value) -> Option<BeatLink> {
         let beat = Beat::from_name(entry.get("beat")?.as_str()?)?;
         let target = Target::from_saved(entry.get("target")?.as_str()?)?;
-        (!target.continuous()).then_some(BeatLink { beat, target })
+        super::fires(target).then_some(BeatLink { beat, target })
     }
 }
 
@@ -343,6 +349,21 @@ mod tests {
         follow: Vec<AudioLink>,
         #[serde(with = "saved_beats")]
         beats: Vec<BeatLink>,
+    }
+
+    #[test]
+    fn a_beat_never_fires_a_beat_action() {
+        // A beat tapping a beat would fire itself every frame.
+        let mut links = AudioLinks::default();
+        links.fire_on(Beat::Any, Target::Action(Action::Beat));
+        links.fire_on(Beat::Bass, Target::Action(Action::TrebleBeat));
+        assert!(links.beats.is_empty());
+        let read: Holder = serde_json::from_value(json!({
+            "follow": [],
+            "beats": [{ "beat": "any", "target": "action:beat" }],
+        }))
+        .unwrap();
+        assert!(read.beats.is_empty());
     }
 
     #[test]

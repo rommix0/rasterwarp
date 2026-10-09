@@ -15,13 +15,15 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
+use crate::audio::Audio;
+use crate::audio_links::AudioLinks;
 use crate::blend::FrameParams;
 use crate::canvas::{self, CanvasChoice};
 use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
 use crate::capture::still;
 use crate::clock::{CanvasClock, Pacing};
-use crate::control::{Action, Links};
+use crate::control::{self, Action, Links};
 use crate::files_ui::FileActions;
 use crate::gpu;
 use crate::inputs::{Input, Kind, View, is_image};
@@ -34,7 +36,7 @@ use crate::passes::composite::Area;
 use crate::presets;
 use crate::preview::PreviewView;
 use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
-use crate::session::{self, Autosave, CameraChoice, InputFile, InputFiles, Project};
+use crate::session::{self, AudioProject, Autosave, CameraChoice, InputFile, InputFiles, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 use crate::video::camera::{self, Status};
@@ -135,6 +137,8 @@ struct State {
     recorder: Option<Recorder>,
     /// The MIDI inputs; drained once per screen refresh.
     midi: Midi,
+    /// The sound source, its analysis and its speakers.
+    audio: Audio,
     ui: UiState,
     /// Paces canvas frames at the program frame rate.
     clock: CanvasClock,
@@ -281,6 +285,11 @@ impl State {
             motion,
             recorder: None,
             midi: Midi::new(),
+            audio: {
+                let mut audio = Audio::new();
+                audio.enable_speakers(true);
+                audio
+            },
             clock: CanvasClock::new(ui.rate, 0.0),
             ui,
             epoch,
@@ -376,6 +385,7 @@ impl State {
             self.apply_input(role, &project.inputs.get(role), &mut problems);
         }
         self.inputs = project.inputs.clone();
+        self.apply_audio(&project.audio);
         self.ui.load_error = (!problems.is_empty()).then(|| problems.join("\n"));
         self.clear_feedback();
         // Loading images stalls; that must not make canvas frames late.
@@ -384,12 +394,48 @@ impl State {
 
     /// A snapshot of the session as a project.
     fn project(&self) -> Project {
-        Project::capture(
-            &self.motion,
-            self.ui.canvas.current,
-            self.ui.rate,
-            &self.inputs,
-        )
+        Project {
+            audio: self.audio_project(),
+            ..Project::capture(
+                &self.motion,
+                self.ui.canvas.current,
+                self.ui.rate,
+                &self.inputs,
+            )
+        }
+    }
+
+    /// The audio as the project saves it.
+    fn audio_project(&self) -> AudioProject {
+        let links = &self.ui.midi.links.audio;
+        AudioProject {
+            source: self.audio.choice().clone(),
+            shaping: self.audio.shaping(),
+            volume: self.audio.volume(),
+            looping: self.audio.looping(),
+            start_with_recording: self.ui.audio.start_with_recording,
+            output: self.audio.output().to_string(),
+            follow: links.follow.clone(),
+            beats: links.beats.clone(),
+        }
+    }
+
+    /// Takes a project's audio: its settings, its links, and its source (a file loads in
+    /// the background; a missing file or device shows in the Audio section).
+    fn apply_audio(&mut self, audio: &AudioProject) {
+        let audio = audio.checked();
+        self.audio.set_shaping(audio.shaping);
+        self.audio.set_volume(audio.volume);
+        self.audio.set_looping(audio.looping);
+        self.audio.set_output(&audio.output);
+        self.ui.audio.start_with_recording = audio.start_with_recording;
+        self.ui.midi.links.audio = AudioLinks {
+            follow: audio.follow.clone(),
+            beats: audio.beats.clone(),
+        };
+        if *self.audio.choice() != audio.source {
+            self.audio.use_choice(audio.source, &self.budget);
+        }
     }
 
     /// Whether `current` differs from the project file (or, Untitled, from how the
@@ -863,6 +909,19 @@ impl State {
         }
     }
 
+    /// Listens to live input and finishes sound-file loads; mutes the speakers during a
+    /// frame-by-frame recording.
+    fn poll_audio(&mut self) {
+        if let Some(Err(why)) = self.audio.poll(Instant::now()) {
+            log::warn!("{why}");
+        }
+        let offline = self
+            .recorder
+            .as_ref()
+            .is_some_and(|r| r.mode() == CaptureMode::Offline);
+        self.audio.set_muted(offline);
+    }
+
     /// Does what an action's button or key does, and nothing where its button would be
     /// disabled or missing.
     fn run_action(&mut self, action: Action) {
@@ -887,6 +946,11 @@ impl State {
             Action::SaveStill => self.save_still(),
             Action::ClearTrails => self.clear_feedback(),
             Action::Pause => self.ui.paused = !self.ui.paused,
+            Action::Beat | Action::BassBeat | Action::TrebleBeat => {
+                if let Some(beat) = action.beat() {
+                    self.audio.tap(beat);
+                }
+            }
         }
     }
 
@@ -1172,6 +1236,16 @@ impl State {
     /// draws the canvas and the preview, and records the frame if a recording is running.
     fn draw_canvas_frame(&mut self) {
         let paused = self.ui.paused;
+        let period = self.clock.rate().period();
+        let audio_frame = self.audio.frame(if paused { 0.0 } else { period });
+        let links = &self.ui.midi.links.audio;
+        let fired = links.fired(&audio_frame.signals);
+        self.motion.set_offsets(links.offsets(&audio_frame.signals));
+        for target in fired {
+            if let Some(action) = control::fire(target, &mut self.motion) {
+                self.run_action(action);
+            }
+        }
         if !paused {
             let rate = self.clock.rate();
             self.time += rate.period();
@@ -1272,6 +1346,7 @@ impl State {
         // is drained on every refresh, and before the panel draws, so a slider shows
         // the new value in the same frame.
         self.handle_midi();
+        self.poll_audio();
 
         // While the window is minimized or hidden no canvas frames are drawn; that time
         // must not count as late frames when it reappears.

@@ -173,11 +173,17 @@ pub enum Action {
     ClearTrails,
     /// Pause or resume.
     Pause,
+    /// A hand beat, as if the sound had one.
+    Beat,
+    /// A hand bass beat (also an Any beat).
+    BassBeat,
+    /// A hand treble beat (also an Any beat).
+    TrebleBeat,
 }
 
 impl Action {
     /// Every action, in the order the MIDI section lists them.
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 13] = [
         Action::Transition,
         Action::Cut,
         Action::SequenceRun,
@@ -188,6 +194,9 @@ impl Action {
         Action::SaveStill,
         Action::ClearTrails,
         Action::Pause,
+        Action::Beat,
+        Action::BassBeat,
+        Action::TrebleBeat,
     ];
 
     /// Its permanent name, as links are saved.
@@ -203,6 +212,9 @@ impl Action {
             Action::SaveStill => "save-still",
             Action::ClearTrails => "clear-trails",
             Action::Pause => "pause",
+            Action::Beat => "beat",
+            Action::BassBeat => "bass-beat",
+            Action::TrebleBeat => "treble-beat",
         }
     }
 
@@ -219,6 +231,20 @@ impl Action {
             Action::SaveStill => "Save still",
             Action::ClearTrails => "Clear trails",
             Action::Pause => "Pause",
+            Action::Beat => "Beat",
+            Action::BassBeat => "Bass beat",
+            Action::TrebleBeat => "Treble beat",
+        }
+    }
+
+    /// The beat a hand-beat action taps, if it is one.
+    pub fn beat(self) -> Option<crate::audio::Beat> {
+        use crate::audio::Beat;
+        match self {
+            Action::Beat => Some(Beat::Any),
+            Action::BassBeat => Some(Beat::Bass),
+            Action::TrebleBeat => Some(Beat::Treble),
+            _ => None,
         }
     }
 }
@@ -738,7 +764,23 @@ mod tests {
                 "save-still",
                 "clear-trails",
                 "pause",
+                "beat",
+                "bass-beat",
+                "treble-beat",
             ]
+        );
+    }
+
+    #[test]
+    fn beat_actions_name_their_beat() {
+        use crate::audio::Beat;
+        assert_eq!(Action::Beat.beat(), Some(Beat::Any));
+        assert_eq!(Action::BassBeat.beat(), Some(Beat::Bass));
+        assert_eq!(Action::TrebleBeat.beat(), Some(Beat::Treble));
+        assert_eq!(Action::Cut.beat(), None);
+        assert_eq!(
+            Target::from_saved("action:bass-beat"),
+            Some(Target::Action(Action::BassBeat))
         );
     }
 
