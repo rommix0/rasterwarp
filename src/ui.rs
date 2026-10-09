@@ -251,7 +251,8 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions
                     egui::Checkbox::new(&mut settings.alpha, "Transparent background (alpha)"),
                 )
                 .on_hover_text(
-                    "Recordings and stills leave the background out: keyed levels are                      see-through, for compositing over other video",
+                    "Recordings and stills leave the background out: keyed levels are \
+                     see-through, for compositing over other video",
                 );
                 if !alpha_ok {
                     let note = "HEVC can't carry alpha; choose ProRes 4444 or FFV1";
