@@ -25,4 +25,4 @@ Developed by Anthony C. Bartman (@rommix0).
 2. Set `FFMPEG_DIR` (the FFmpeg build) and `LIBCLANG_PATH` in `.cargo/config.toml`.
 3. `cargo run --release`
 
-To make a distributable copy, run `powershell -ExecutionPolicy Bypass -File .\dist.ps1`. It builds a release and copies `rasterwarp.exe`, the FFmpeg DLLs and this README into `dist\`.
+To make a distributable copy, run `powershell -ExecutionPolicy Bypass -File .\dist.ps1`. It builds a release and copies `rasterwarp.exe` and the FFmpeg DLLs into `dist\`.

@@ -1,5 +1,5 @@
-# Builds a release and copies what it needs to run into dist\: rasterwarp.exe, the
-# FFmpeg DLLs build.rs puts next to it, and the README. Run from the repo root:
+# Builds a release and copies what it needs to run into dist: rasterwarp.exe and the
+# FFmpeg DLLs build.rs puts next to it. Run from the repo root:
 #   powershell -ExecutionPolicy Bypass -File .\dist.ps1
 # dist\ is gitignored. Files already in it are overwritten, never deleted.
 
@@ -17,7 +17,6 @@ Copy-Item (Join-Path $release 'rasterwarp.exe') $dist -Force
 $dlls = Get-ChildItem (Join-Path $release '*.dll')
 if ($dlls.Count -eq 0) { throw "no FFmpeg DLLs in $release; check FFMPEG_DIR" }
 $dlls | Copy-Item -Destination $dist -Force
-Copy-Item (Join-Path $PSScriptRoot 'README.md') $dist -Force
 
 Write-Host "dist ready:"
 Get-ChildItem $dist | Format-Table Name, Length -AutoSize
