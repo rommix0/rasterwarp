@@ -1,8 +1,12 @@
-# Rasterwarp
+![](images/program_screenshot.jpg)
 
-Real-time animation software that recreates the look of 1970s analog video synthesis: artwork warped by oscillator-driven deflection, colorized by brightness level, with CRT glow and feedback trails. It runs on the GPU and is played live, like an instrument.
+<img src="images/decal.png" title="" alt="" data-align="center" /> 
 
-Developed by Anthony C. Bartman (@rommix0).
+**Developed by Anthony C. Bartman (@rommix0)**
+
+Real-time video animation software heavily inspired by old video synthesizers from the 70s such as Scanimate.
+
+Warp using oscillator-driven deflection, colorized by brightness level, with CRT glow and feedback trails. It runs on the GPU and can be played live using audio input and MIDI.
 
 ## Features
 
