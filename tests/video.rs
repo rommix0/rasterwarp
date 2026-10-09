@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32};
 
 use rasterwarp::capture::encode::{Encoder, Frame, VideoFormat};
 use rasterwarp::rate::FrameRate;
+use rasterwarp::video::camera::{self, Camera, Status};
 use rasterwarp::video::clip::{self, Loading};
 use rasterwarp::video::{Budget, MEMORY_LIMIT, Pixels};
 
@@ -129,4 +130,41 @@ fn clips_load_on_a_worker_thread() {
     let clip = loading.wait().unwrap();
     assert_eq!(clip.count(), FRAMES as u32);
     assert_eq!(loading.progress(), 1.0);
+}
+
+#[test]
+fn cameras_deliver_frames_when_one_is_connected() {
+    let names = camera::list().unwrap();
+    let Some(name) = names.first() else {
+        eprintln!("skipping camera test: no camera connected");
+        return;
+    };
+    let budget = Budget::new(MEMORY_LIMIT);
+    let cam = Camera::open(name, Pixels::Luma, (320, 180), 2.0, &budget);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while cam.arrivals().len() < 3 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no frames: {:?}",
+            cam.status()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(cam.status(), Status::Live);
+    let format = cam.format().unwrap();
+    assert!(format.size.0 <= 320 && format.size.1 <= 180, "{format:?}");
+    let arrivals = cam.arrivals();
+    let newest = arrivals.last().unwrap();
+    assert!(
+        arrivals
+            .windows(2)
+            .all(|w| w[1].seq == w[0].seq + 1 && w[1].time >= w[0].time)
+    );
+    let frame = cam.frame(newest.seq).unwrap();
+    assert_eq!(frame.full.len() as u64, format.bytes_at(format.size));
+    assert!(cam.frame(newest.seq + 1).is_none());
+    assert!(
+        budget.available() < MEMORY_LIMIT,
+        "the buffer holds its memory"
+    );
 }
