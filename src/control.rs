@@ -3,6 +3,7 @@
 
 use std::ops::RangeInclusive;
 
+use crate::audio_links::AudioLinks;
 use crate::motion::{Mode, Motion};
 use crate::params::table::{ChoiceId, SliderId};
 use crate::save::Named;
@@ -350,12 +351,27 @@ impl Link {
     }
 }
 
+/// Fires a key-style target the way a MIDI key does: picks an option in the bank the
+/// panel edits, switches the mode, or returns the action for the app to run. Sliders
+/// and the duration aren't fired; they return None and change nothing.
+pub fn fire(target: Target, motion: &mut Motion) -> Option<Action> {
+    match target {
+        Target::Choice(id, option) => id.set(motion.editable(), option),
+        Target::Mode(mode) => motion.set_mode(mode),
+        Target::Action(action) => return Some(action),
+        Target::Slider(_) | Target::Duration => {}
+    }
+    None
+}
+
 /// The links in use, and the target waiting for a control while one is being learned.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Links {
-    /// Every link, in the order they were made.
+    /// Every MIDI link, in the order they were made (saved with the app settings).
     pub list: Vec<Link>,
     learning: Option<Target>,
+    /// The audio links (saved with the project).
+    pub audio: AudioLinks,
 }
 
 impl Links {
@@ -364,6 +380,7 @@ impl Links {
         Links {
             list,
             learning: None,
+            audio: AudioLinks::default(),
         }
     }
 
@@ -429,9 +446,7 @@ impl Links {
                     motion.ab.duration =
                         link.value(amount).clamp(*DURATION.start(), *DURATION.end());
                 }
-                (Target::Choice(id, option), None) => id.set(motion.editable(), option),
-                (Target::Mode(mode), None) => motion.set_mode(mode),
-                (Target::Action(action), None) => actions.push(action),
+                (target, None) => actions.extend(fire(target, motion)),
                 _ => {}
             }
         }
@@ -749,6 +764,24 @@ mod tests {
         assert_eq!(levels.value(0.45), 5.0);
         let duration = Link::new(source, Target::Duration);
         assert_eq!((duration.min, duration.max), (0.1, 30.0));
+    }
+
+    #[test]
+    fn firing_a_target_acts_like_a_key() {
+        let mut motion = Motion::new(Params::default());
+        let waveform = crate::params::table::ChoiceId::Waveform(1);
+        assert_eq!(fire(Target::Choice(waveform, 2), &mut motion), None);
+        assert_eq!(waveform.get(motion.editable()), 2);
+        assert_eq!(fire(Target::Mode(Mode::Transition), &mut motion), None);
+        assert_eq!(motion.mode(), Mode::Transition);
+        assert_eq!(
+            fire(Target::Action(Action::Cut), &mut motion),
+            Some(Action::Cut)
+        );
+        let before = *motion.editable();
+        assert_eq!(fire(Target::Slider(SliderId::Zoom), &mut motion), None);
+        assert_eq!(fire(Target::Duration, &mut motion), None);
+        assert_eq!(*motion.editable(), before, "sliders aren't fired");
     }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]

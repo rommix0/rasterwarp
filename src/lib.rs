@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod audio;
+pub mod audio_links;
 pub mod blend;
 pub mod canvas;
 pub mod capture;
