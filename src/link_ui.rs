@@ -401,33 +401,107 @@ mod tests {
         assert_eq!(link_names(&links, Target::Action(Action::Pause)), None);
     }
 
-    #[test]
-    fn the_audio_section_draws_with_and_without_links() {
-        use crate::audio::Signal;
-        use crate::audio_ui::{AudioActions, AudioUi, audio_section};
-        let mut links = Links::default();
+    /// Draws the Audio section once with its header open (the app leaves it closed) and
+    /// gives its height and what it asked for.
+    fn draw_audio_section(
+        audio: &mut crate::audio_ui::AudioUi,
+        links: &mut Links,
+        offsets: &[(SliderId, f32)],
+    ) -> (f32, crate::audio_ui::AudioActions) {
+        use crate::audio_ui::{AudioActions, audio_section};
         let params = Params::default();
-        let mut audio = AudioUi::default();
+        let mut actions = AudioActions::default();
+        let mut height = 0.0;
+        frame(|ui| {
+            // The header sits in a child ui, so its id can't be built here; this makes
+            // egui draw every collapsing header open.
+            ui.ctx().memory_mut(|m| m.set_everything_is_visible(true));
+            audio_section(ui, audio, links, &params, offsets, &mut actions);
+            height = ui.min_rect().height();
+        });
+        (height, actions)
+    }
+
+    #[test]
+    fn the_audio_section_body_runs_when_it_is_open() {
+        use crate::audio_ui::{AudioActions, AudioUi, SourceKind, audio_section};
+        // Closed (the default), the body never runs, so nothing is asked for.
+        let mut audio = AudioUi {
+            kind: SourceKind::Input,
+            ..AudioUi::default()
+        };
+        let mut closed = AudioActions::default();
+        let mut closed_height = 0.0;
         frame(|ui| {
             audio_section(
                 ui,
                 &mut audio,
-                &mut links,
-                &params,
+                &mut Links::default(),
+                &Params::default(),
                 &[],
-                &mut AudioActions::default(),
-            )
+                &mut closed,
+            );
+            closed_height = ui.min_rect().height();
         });
+        assert!(!closed.list_devices);
+        // Open, an input section with no device list yet asks for one.
+        let (open_height, open) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
+        assert!(open.list_devices);
+        assert!(open_height > closed_height);
+    }
+
+    #[test]
+    fn the_audio_section_draws_a_file_with_links() {
+        use crate::audio::{FileState, Signal};
+        use crate::audio_ui::{AudioUi, SourceKind};
+        use crate::control::Action;
+        let mut links = Links::default();
         links.audio.follow_signal(Signal::Level, SliderId::Zoom);
-        frame(|ui| {
-            audio_section(
-                ui,
-                &mut audio,
-                &mut links,
-                &params,
-                &[(SliderId::Zoom, 0.25)],
-                &mut AudioActions::default(),
-            )
-        });
+        links
+            .audio
+            .fire_on(crate::audio::Beat::Bass, Target::Action(Action::Cut));
+        let mut audio = AudioUi {
+            kind: SourceKind::File,
+            outputs: Some(vec!["Speakers".to_string()]),
+            file: Some(FileState {
+                name: "drums.wav".to_string(),
+                position: 1.0,
+                length: 4.0,
+                playing: true,
+            }),
+            loading: Some("Loading more.wav… 40%".to_string()),
+            error: Some("no speakers".to_string()),
+            ..AudioUi::default()
+        };
+        let (with_links, actions) =
+            draw_audio_section(&mut audio, &mut links, &[(SliderId::Zoom, 0.25)]);
+        // A plain draw asks for nothing and changes nothing.
+        assert!(actions.use_source.is_none() && actions.play.is_none());
+        assert!(actions.seek.is_none() && actions.tap.is_none());
+        assert!(!actions.choose_file && !actions.list_devices && !actions.restart);
+        assert_eq!(audio.shaping, crate::audio::Shaping::default());
+        assert_eq!(links.audio.follow.len(), 1);
+        assert_eq!(links.audio.beats.len(), 1);
+        // The link grid makes the section taller than the hint it shows without links.
+        let (without, _) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
+        assert!(with_links > without, "{with_links} vs {without}");
+    }
+
+    #[test]
+    fn the_audio_section_draws_an_input_with_devices_and_no_links() {
+        use crate::audio_ui::{AudioUi, SourceKind};
+        let mut audio = AudioUi {
+            kind: SourceKind::Input,
+            inputs: Some(vec!["Mic".to_string()]),
+            listing_error: Some("no loopback".to_string()),
+            ..AudioUi::default()
+        };
+        let (_, actions) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
+        assert!(!actions.list_devices && actions.use_source.is_none());
+        audio.inputs = Some(Vec::new());
+        audio.kind = SourceKind::Loopback;
+        audio.outputs = Some(Vec::new());
+        let (_, actions) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
+        assert!(!actions.list_devices);
     }
 }
