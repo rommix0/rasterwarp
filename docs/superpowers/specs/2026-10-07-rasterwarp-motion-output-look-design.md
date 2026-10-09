@@ -1,7 +1,7 @@
 # Rasterwarp: Motion, Output and Look: Design
 
 Date: 2026-10-07
-Status: Approved 2026-10-07; amended 2026-10-07 with the off-air preview (Plan 2) and the program frame rate (after Plan 2)
+Status: Approved 2026-10-07; amended 2026-10-07 with the off-air preview (Plan 2) and the program frame rate (after Plan 2); "Later" brought up to date 2026-10-09
 Builds on: `docs/superpowers/specs/2026-10-06-rasterwarp-prototype-design.md` (the prototype, now on `main`)
 Research: `docs/research/scanimate-manuals/` (notes taken from the three scanned manuals in `manuals/`)
 
@@ -302,7 +302,7 @@ The whole program runs its canvas at one chosen frame rate, so motion and trails
 ### Level keying
 
 - **Params:** `key.enabled` (default off) and `key.levels: u8` (bitmask of see-through levels, default bit 0).
-- **Background image:** loaded with an `rfd` file dialog ("Background image…" in the Keying section, "No background" clears it), converted to sRGB RGBA, and size-checked like sources. It is drawn with a "cover" fit and is not a `Params` field. Without a background image, keyed areas show black.
+- **Background image:** loaded with an `rfd` file dialog ("Background image…" in the Keying section, "No background" clears it; since 2026-10-09 these live in the panel's Background section, which also takes videos and cameras, see the video-inputs spec), converted to sRGB RGBA, and size-checked like sources. It is drawn with a "cover" fit and is not a `Params` field. Without a background image, keyed areas show black.
 - **Pipeline:**
   - Colorize writes alpha = 0 for see-through levels and 1 otherwise (blended across softness), keyed by brightness level rather than by the cycling palette color. Its output is **premultiplied** (color × alpha).
   - Feedback carries alpha with the same `max` rule. Because the color is premultiplied, a trail over the background fades at the feedback rate, not twice as fast.
@@ -348,16 +348,18 @@ All pure logic gets unit tests. GPU parts get pipeline-build tests and readback 
 
 ## Later (documented, not built now)
 
-Raster sections (up to 5 bands with independent deflection and intensity); the sequential intensity generator; blanking-comparator wipes; modulation matrix / node graph (multipliers, rectifiers, summers, programmed phase lock); MIDI/OSC; audio-driven amplitude ("mouth control"); alpha export (FFV1 with alpha); video backgrounds and live camera; overlapping sequence ramps; persisting curves, cues and presets to disk.
+Raster sections (up to 5 bands with independent deflection and intensity); the sequential intensity generator; blanking-comparator wipes; modulation matrix / node graph (multipliers, rectifiers, summers, programmed phase lock); MIDI/OSC; audio-driven amplitude ("mouth control"); alpha export (FFV1 with alpha); overlapping sequence ramps.
+
+**Built since:** persisting curves, cues and presets to disk (`2026-10-07-rasterwarp-save-load-design.md`); video backgrounds and live camera, as source or background (`2026-10-08-rasterwarp-video-inputs-design.md`).
 
 **Deferred from the `EFFECTS_HANDOFF.md` review (2026-10-08)**, to keep scope from creeping before the instrument is complete:
 - **"Everything is patchable" / node-graph routing** (the handoff's architecture principles, feedback anywhere): a rewrite of the pipeline and the UI. If more modulation is wanted, a small fixed matrix (a few sources × a few targets) comes first; see the modulation matrix above.
-- **Optical-flow frame interpolation** for transitions: transitions here interpolate parameter sets, not frames, so it doesn't apply; even with video inputs it is heavy (DIS/Farneback, RAFT/RIFE).
+- **Optical-flow frame interpolation:** dropped (2026-10-09). Transitions interpolate parameter sets, not frames, and video inputs blend neighbouring frames instead.
 - **Full 3D Rutt-Etra** (true z, perspective camera, hidden-line removal, point clouds, mesh-warp mode): a second renderer. Raster mode plus brightness-driven deflection covers the 2D look.
 - **Generator zoo:** reaction-diffusion, cellular automata, strange attractors, Lissajous curves, particle systems, text/glyphs, shape and gradient generators. Each is its own simulation; pick at most one later (reaction-diffusion pairs best with feedback).
 - **Audio input and FFT** (bands, envelope follower, beat detection, audio-as-image), **sequencers/euclidean rhythms/slew**, and **gamepad** input.
 - **NDI / Spout / Syphon output.**
-- **Datamosh / block smearing, dither** (ordered, blue noise, error diffusion), **lighting / normal mapping, frame delay / echo / slit-scan / time displacement, LUT loading, HSV/LCH and channel-mixing tools, glitch** (bit crush, channel swaps).
+- **Datamosh / block smearing, dither** (ordered, blue noise, error diffusion), **lighting / normal mapping, frame echo / time displacement of the output (delay and slit-scan exist for video and camera inputs; see the video-inputs spec), LUT loading, HSV/LCH and channel-mixing tools, glitch** (bit crush, channel swaps).
 - **Edge direction as a vector field** and **edge-gated per-pixel modulation** (edge magnitude as a source mode is in scope; routing edge direction is not).
 - **Float precision throughout as a principle:** only as a targeted fix if trails show banding.
 

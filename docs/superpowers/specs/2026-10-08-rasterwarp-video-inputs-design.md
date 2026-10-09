@@ -1,18 +1,18 @@
 # Rasterwarp: Video Inputs: Design
 
 Date: 2026-10-08
-Status: Approved 2026-10-08 (design reviewed section by section in chat)
+Status: Approved 2026-10-08 (design reviewed section by section in chat); built and merged 2026-10-09. Amended 2026-10-09: slit-scan on a playing clip follows the playhead's history, the memory message says what is free, and optical-flow interpolation is dropped.
 Builds on: `docs/superpowers/specs/2026-10-07-rasterwarp-motion-output-look-design.md` and `docs/superpowers/specs/2026-10-07-rasterwarp-save-load-design.md` (both on `main`). The motion/output/look spec listed "video backgrounds and live camera" under Later.
 
 ## Goals
 
 - **Video files and cameras as inputs:** either one can be the **source** (the image the warp, raster and colorizer manipulate) or the **background** (the color image keyed levels show), alongside today's images.
 - **Play modes for clips:** loop forwards or backwards at a speed, ping-pong, or scrub, with the frame position as a parameter that A/B transitions and sequence cues ramp through.
-- **Between-frame interpolation:** when the playhead sits between two frames, show the nearest one or blend the two. Optical flow is a later choice in the same setting.
+- **Between-frame interpolation:** when the playhead sits between two frames, show the nearest one or blend the two.
 - **Time effects:** a **delay** for cameras (show the camera as it was some seconds ago) and **slit-scan** for clips and cameras (each pixel shows a different moment, chosen line by line, column by column, or by a black-and-white map image).
 
-**Out of scope** (next or later):
-- **Optical-flow interpolation:** the next spec. This design leaves its slot: a third `Between frames` choice, computed in the same GPU pass.
+**Out of scope** (later):
+- **Optical-flow interpolation:** dropped (2026-10-09). Nearest and Blend are the `Between frames` choices.
 - **Streaming long clips** from disk. Clips here are short loops held in memory.
 - **Audio** from video files or cameras.
 - **Play modes on the camera buffer:** loop, ping-pong or scrub over the last N seconds. Echo (several delayed copies mixed).
@@ -35,7 +35,7 @@ The **source** is always grayscale (luma), so a color clip or camera becomes gra
 - **The whole clip is decoded into memory** when it opens, so every frame is instantly available forwards, backwards and when scrubbing.
 - **Frames are scaled** to fit inside the canvas size at the time of loading (keeping the clip's aspect ratio; never scaled up), and stored as luma (1 byte per pixel) for the source or RGBA for the background. Each frame also keeps a small copy at the off-air preview's width for the preview (see "The off-air preview"). Changing the canvas size later does not re-decode; the frames are sampled at whatever size they have.
 - **The clip records** its frame count and frame rate (the stream's average frame rate; 30 fps if FFmpeg reports none).
-- **Memory budget:** clips and camera buffers together may hold at most **2 GB** of frames. A clip that would exceed what's left is refused with its size: "flip.mp4 needs 3.1 GB of memory; shorten it or lower the canvas size".
+- **Memory budget:** clips and camera buffers together may hold at most **2 GB** of frames. A clip larger than the whole budget is refused with its size: "flip.mp4 needs 3.1 GB of memory; shorten it or lower the canvas size". One that fits the budget but not beside the other inputs says what is free: "flip.mp4 needs 1.2 GB of memory and only 0.8 GB is free; clear the current source or background first, shorten it, or lower the canvas size".
 - **Loading runs on a worker thread.** The panel shows "Loading flip.mp4… 40%". The previous input stays on screen until the clip is ready. Opening another file cancels a load in progress.
 
 ## Cameras
@@ -54,7 +54,7 @@ The **source** is always grayscale (luma), so a color clip or camera becomes gra
 | `mode` | Loop, Ping-pong, Scrub | Loop | switches at the midpoint |
 | `speed` | −4…+4 (× the clip's own rate; negative plays backwards) | 1 | lerps (through the video clock) |
 | `position` | 0–1 of the clip (Scrub) | 0 | lerps |
-| `between` | Nearest, Blend (Optical flow later) | Blend | switches at the midpoint |
+| `between` | Nearest, Blend | Blend | switches at the midpoint |
 | `delay` | 0–30 s (cameras; clamped to the camera's buffer length when used) | 0 | lerps |
 | `slit` | Off, Rows, Columns, Map | Off | switches at the midpoint |
 | `slit_depth` | 0…max depth, seconds | 1 | lerps |
@@ -93,9 +93,9 @@ Each pixel shows the input from a different moment: `offset(x, y) = slit_depth �
 
 ## On the GPU
 
-- **A new pass, `passes/frames.rs`**, runs before warp/raster for the source and before composite for the background. It produces the texture the rest of the pipeline already samples: `R8Unorm` for the source, `Rgba8UnormSrgb` for the background. It mixes the `lo` and `hi` frames, or for slit-scan computes each pixel's own frame index and mixes per pixel. Optical flow will be computed here later.
+- **A new pass, `passes/frames.rs`**, runs before warp/raster for the source and before composite for the background. It produces the texture the rest of the pipeline already samples: `R8Unorm` for the source, `Rgba8UnormSrgb` for the background. It mixes the `lo` and `hi` frames, or for slit-scan computes each pixel's own frame index and mixes per pixel.
 - **Frames live in a texture array used as a ring:** frame index *n* lives in layer `n mod layers`, and only frames missing from the needed window are uploaded. With slit-scan off, the window is just `lo` and `hi`, so normal playback uploads at most one new frame per input per canvas frame when playing forwards.
-- **Window and depth cap:** with slit-scan on, the window is `ceil(slit_depth × fps) + 2` frames. Layers are capped by the smaller of 256 (wgpu's default `max_texture_array_layers`), the device limit, and a **1 GB VRAM budget** divided by the bytes per layer. The panel shows the resulting maximum depth (about 8.5 s for 720p grayscale at 30 fps; less for full-color 1080p backgrounds), and the depth slider stops there. A cue or file with a deeper value is clamped when used.
+- **Window and depth cap:** with slit-scan on, the window covers every frame the slit-scan shows: `ceil(slit_depth × fps) + 2` frames for a clip playing at 1× or a camera (more when a clip plays faster, fewer when slower), held to what the ring fits. Layers are capped by the smaller of 256 (wgpu's default `max_texture_array_layers`), the device limit, and a **1 GB VRAM budget** divided by the bytes per layer. The panel shows the resulting maximum depth (about 8.5 s for 720p grayscale at 30 fps; less for full-color 1080p backgrounds), and the depth slider stops there. A cue or file with a deeper value is clamped when used.
 - **Image inputs** keep today's single texture, so an image costs nothing new.
 - **Raster beam reset:** changing the input (new file, new camera) resets the beam as changing the source image does today. New frames from the same input do not.
 
@@ -160,5 +160,4 @@ Every error is shown in the panel, and the previous input stays on screen.
 
 ## Later
 
-- **Optical-flow interpolation** (next spec): a third `Between frames` choice. Flow between neighbouring clip frames is computed once on the GPU and cached; frames are warped toward the playhead's fraction from both sides and blended, falling back to blending where the two flows disagree.
 - Play modes and echo on the camera buffer; video as a slit-scan map; streaming long clips; audio; camera mode and resolution choice.

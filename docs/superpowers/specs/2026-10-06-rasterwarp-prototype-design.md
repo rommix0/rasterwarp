@@ -1,7 +1,7 @@
 # Rasterwarp Prototype: Design
 
 Date: 2026-10-06
-Status: Approved design, pending implementation plan
+Status: Built (the prototype is on `main`); later specs extend it
 Source: `HANDOFF.md` (project goals and prior decisions)
 
 ## Scope
@@ -18,6 +18,10 @@ The initial prototype covers HANDOFF steps 1–6:
 **Out of scope** (deferred to later specs): node-graph patching, MIDI/OSC, automation
 recording, audio reactivity, SVG/font/SDF inputs, video/camera input, export,
 Rutt/Etra mode, purist scanline-deflection mode, preset save/load, shader hot-reload.
+Built since, in later specs: export (video capture) and a true raster (scanline) mode
+(`2026-10-07-rasterwarp-motion-output-look-design.md`), preset save/load
+(`2026-10-07-rasterwarp-save-load-design.md`), and video/camera input
+(`2026-10-08-rasterwarp-video-inputs-design.md`).
 
 Dev machine: Windows 10, NVIDIA RTX 3090, Rust 1.98 stable (MSVC).
 
