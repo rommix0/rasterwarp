@@ -5,9 +5,9 @@ use std::f32::consts::PI;
 use std::ops::RangeInclusive;
 
 use crate::params::{
-    Axis, ColorizeParams, Envelope, FeedbackParams, GlowParams, KeyParams, OSCILLATOR_COUNT,
-    OscInput, OscSync, Oscillator, PALETTE_SIZE, Params, RasterParams, THRESHOLD_COUNT, Waveform,
-    ranges, srgb_to_linear,
+    Axis, Between, ColorizeParams, Envelope, FeedbackParams, GlowParams, KeyParams,
+    OSCILLATOR_COUNT, OscInput, OscSync, Oscillator, PALETTE_SIZE, Params, PlayMode, RasterParams,
+    Role, Slit, THRESHOLD_COUNT, VideoParams, Waveform, ranges, srgb_to_linear,
 };
 
 /// At most two slots per oscillator (one per bank) while their settings differ.
@@ -23,6 +23,9 @@ pub struct Clocks {
     pub lfo: [f64; OSCILLATOR_COUNT],
     /// Palette cycle offset, in levels (unwrapped).
     pub cycle: f64,
+    /// Clip time of each input's video, in seconds (unwrapped), indexed by
+    /// [`Role::index`]. It runs in every play mode; Scrub just doesn't read it.
+    pub video: [f64; 2],
 }
 
 impl Clocks {
@@ -35,6 +38,9 @@ impl Clocks {
             self.advance_osc(i, osc.sync, osc.phase_speed, osc.lfo_rate, dt);
         }
         self.cycle += f64::from(p.colorize.cycle_speed) * dt;
+        for role in Role::ALL {
+            self.video[role.index()] += f64::from(p.video(role).speed) * dt;
+        }
     }
 
     fn advance_osc(&mut self, i: usize, sync: OscSync, phase_speed: f32, lfo_rate: f32, dt: f64) {
@@ -53,7 +59,8 @@ impl Clocks {
 /// stay equal, and the oscillator's speed glides from `from`'s to `to`'s along the
 /// curve. (Lerping two clocks that each ran at their own side's rate would spin the wave
 /// faster than either side, more so the longer the ramp.) Clocks that only crossfading
-/// oscillators read run at their own side's rates. The palette cycle always glides.
+/// oscillators read run at their own side's rates. The palette cycle and the video clocks
+/// always glide.
 pub fn advance_ramp(
     from_clocks: &mut Clocks,
     to_clocks: &mut Clocks,
@@ -94,6 +101,12 @@ pub fn advance_ramp(
     )) * dt64;
     from_clocks.cycle += cycle;
     to_clocks.cycle += cycle;
+    for role in Role::ALL {
+        let (a, b) = (from.video(role), to.video(role));
+        let step = f64::from(lerp_in(a.speed, b.speed, t, ranges::PLAY_SPEED)) * dt64;
+        from_clocks.video[role.index()] += step;
+        to_clocks.video[role.index()] += step;
+    }
 }
 
 /// One oscillator as the warp shader runs it.
@@ -145,6 +158,22 @@ pub struct ColorizeFrame {
     pub ringing: f32,
 }
 
+/// One input's playback settings as this frame uses them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VideoFrame {
+    pub mode: PlayMode,
+    /// The video clock: clip time in seconds, unwrapped.
+    pub clock: f64,
+    /// Which way the clip is playing (its sign), for slit-scan.
+    pub speed: f32,
+    pub position: f32,
+    pub between: Between,
+    pub delay: f32,
+    pub slit: Slit,
+    pub slit_depth: f32,
+    pub slit_flip: bool,
+}
+
 /// Everything the renderer needs for one frame.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrameParams {
@@ -154,6 +183,8 @@ pub struct FrameParams {
     pub glow: GlowParams,
     pub raster: RasterParams,
     pub key: KeyParams,
+    /// Indexed by [`Role::index`].
+    pub video: [VideoFrame; 2],
 }
 
 impl FrameParams {
@@ -288,6 +319,26 @@ pub fn blend(
         glow: blend_glow(&from.glow, &to.glow, t),
         raster: blend_raster(&from.raster, &to.raster, t),
         key: if t >= 0.5 { to.key } else { from.key },
+        video: Role::ALL.map(|role| {
+            let i = role.index();
+            let clock = lerp_phase(from_clocks.video[i], to_clocks.video[i], t);
+            blend_video(from.video(role), to.video(role), t, clock)
+        }),
+    }
+}
+
+fn blend_video(a: &VideoParams, b: &VideoParams, t: f32, clock: f64) -> VideoFrame {
+    let discrete = if t >= 0.5 { b } else { a };
+    VideoFrame {
+        mode: discrete.mode,
+        clock,
+        speed: lerp_in(a.speed, b.speed, t, ranges::PLAY_SPEED),
+        position: lerp_in(a.position, b.position, t, ranges::POSITION),
+        between: discrete.between,
+        delay: lerp_in(a.delay, b.delay, t, ranges::DELAY),
+        slit: discrete.slit,
+        slit_depth: lerp_in(a.slit_depth, b.slit_depth, t, ranges::SLIT_DEPTH),
+        slit_flip: discrete.slit_flip,
     }
 }
 
@@ -452,6 +503,62 @@ mod tests {
         let over = blend(&a, &b, 3.0, Some(0.9), &rest(), &rest());
         assert_eq!(over.warp.line_jitter, *ranges::LINE_JITTER.end());
         assert_eq!(over.raster.beam_width, *ranges::BEAM_WIDTH.end());
+    }
+
+    #[test]
+    fn video_settings_lerp_and_switch_at_midpoint() {
+        let a = Params::default();
+        let mut b = a;
+        let v = b.video_mut(Role::Background);
+        v.mode = PlayMode::Scrub;
+        v.speed = -3.0;
+        v.position = 0.8;
+        v.between = Between::Nearest;
+        v.delay = 4.0;
+        v.slit = Slit::Rows;
+        v.slit_depth = 5.0;
+        v.slit_flip = true;
+        let early = blend(&a, &b, 0.25, Some(0.25), &rest(), &rest()).video[1];
+        assert!((early.speed - 0.0).abs() < 1e-6);
+        assert!((early.position - 0.2).abs() < 1e-6);
+        assert!((early.delay - 1.0).abs() < 1e-6);
+        assert!((early.slit_depth - 2.0).abs() < 1e-6);
+        assert_eq!(early.mode, PlayMode::Loop);
+        assert_eq!(
+            (early.between, early.slit, early.slit_flip),
+            (Between::Blend, Slit::Off, false)
+        );
+        let late = blend(&a, &b, 0.5, Some(0.5), &rest(), &rest()).video[1];
+        assert_eq!(late.mode, PlayMode::Scrub);
+        assert_eq!(
+            (late.between, late.slit, late.slit_flip),
+            (Between::Nearest, Slit::Rows, true)
+        );
+        let source = blend(&a, &b, 0.5, Some(0.5), &rest(), &rest()).video[0];
+        assert_eq!(source.mode, PlayMode::Loop, "the source is unchanged");
+    }
+
+    #[test]
+    fn video_clocks_run_at_their_speeds() {
+        let mut p = Params::default();
+        p.video_mut(Role::Source).speed = -2.0;
+        let mut c = Clocks::default();
+        c.advance(&p, 0.5);
+        assert_eq!(c.video, [-1.0, 0.5]);
+        let f = blend(&p, &p, 0.0, None, &c, &c);
+        assert_eq!((f.video[0].clock, f.video[1].clock), (-1.0, 0.5));
+    }
+
+    #[test]
+    fn ramps_glide_video_speed_on_both_sides() {
+        let a = Params::default();
+        let mut b = a;
+        b.video_mut(Role::Source).speed = -3.0;
+        let (mut from, mut to) = (rest(), rest());
+        advance_ramp(&mut from, &mut to, &a, &b, 0.5, 2.0);
+        // Halfway from 1× to −3×: −1× for 2 s.
+        assert!((from.video[0] + 2.0).abs() < 1e-9);
+        assert_eq!(from, to, "both sides stay on one clock");
     }
 
     #[test]

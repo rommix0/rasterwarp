@@ -43,6 +43,13 @@ pub mod ranges {
     pub const BEAM_WIDTH: RangeInclusive<f32> = 0.5..=4.0;
     pub const COMPENSATION: RangeInclusive<f32> = 0.0..=1.0;
     pub const SPEED_COMPENSATION: RangeInclusive<f32> = 0.0..=1.0;
+    /// Clip playback speed, × the clip's own frame rate; negative plays backwards.
+    pub const PLAY_SPEED: RangeInclusive<f32> = -4.0..=4.0;
+    pub const POSITION: RangeInclusive<f32> = 0.0..=1.0;
+    /// Seconds. A camera's delay is also held to its buffer length when used.
+    pub const DELAY: RangeInclusive<f32> = 0.0..=30.0;
+    /// Seconds. The GPU's frame ring may allow less, which is applied when used.
+    pub const SLIT_DEPTH: RangeInclusive<f32> = 0.0..=30.0;
 }
 
 pub const OSCILLATOR_COUNT: usize = 4;
@@ -260,6 +267,154 @@ pub struct GlowParams {
     pub noise: f32,
 }
 
+/// How a clip plays.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlayMode {
+    /// Plays at `speed` and wraps around at the ends.
+    #[default]
+    Loop,
+    /// Plays at `speed` and bounces back at the ends.
+    PingPong,
+    /// Shows the frame at `position`; transitions and cues ramp through the clip.
+    Scrub,
+}
+
+impl PlayMode {
+    pub const ALL: [PlayMode; 3] = [PlayMode::Loop, PlayMode::PingPong, PlayMode::Scrub];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayMode::Loop => "Loop",
+            PlayMode::PingPong => "Ping-pong",
+            PlayMode::Scrub => "Scrub",
+        }
+    }
+}
+
+saved_names!(PlayMode {
+    Loop => "loop",
+    PingPong => "ping-pong",
+    Scrub => "scrub",
+});
+
+/// What shows when the playhead sits between two frames.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Between {
+    Nearest,
+    #[default]
+    Blend,
+}
+
+impl Between {
+    pub const ALL: [Between; 2] = [Between::Nearest, Between::Blend];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Between::Nearest => "Nearest",
+            Between::Blend => "Blend",
+        }
+    }
+}
+
+saved_names!(Between {
+    Nearest => "nearest",
+    Blend => "blend",
+});
+
+/// Slit-scan: which pixels show older moments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Slit {
+    #[default]
+    Off,
+    /// The top row is now, the bottom row is the depth ago.
+    Rows,
+    /// The left column is now, the right column is the depth ago.
+    Columns,
+    /// A black-and-white map image: black is now, white is the depth ago.
+    Map,
+}
+
+impl Slit {
+    pub const ALL: [Slit; 4] = [Slit::Off, Slit::Rows, Slit::Columns, Slit::Map];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Slit::Off => "Off",
+            Slit::Rows => "Rows",
+            Slit::Columns => "Columns",
+            Slit::Map => "Map",
+        }
+    }
+}
+
+saved_names!(Slit {
+    Off => "off",
+    Rows => "rows",
+    Columns => "columns",
+    Map => "map",
+});
+
+/// How a video or camera input plays. Images ignore it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoParams {
+    /// Clips only.
+    pub mode: PlayMode,
+    /// Loop and Ping-pong: × the clip's own frame rate; negative plays backwards.
+    pub speed: f32,
+    /// Scrub: 0 = the first frame, 1 = the last.
+    pub position: f32,
+    pub between: Between,
+    /// Cameras only: how many seconds behind live.
+    pub delay: f32,
+    pub slit: Slit,
+    /// Seconds behind the playhead at the far end of the slit-scan map.
+    pub slit_depth: f32,
+    /// Reverses the slit-scan map, so its far end is now.
+    pub slit_flip: bool,
+}
+
+impl Default for VideoParams {
+    fn default() -> Self {
+        Self {
+            mode: PlayMode::Loop,
+            speed: 1.0,
+            position: 0.0,
+            between: Between::Blend,
+            delay: 0.0,
+            slit: Slit::Off,
+            slit_depth: 1.0,
+            slit_flip: false,
+        }
+    }
+}
+
+/// The two inputs: the source the passes manipulate, and the background keyed levels
+/// show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Source,
+    Background,
+}
+
+impl Role {
+    pub const ALL: [Role; 2] = [Role::Source, Role::Background];
+
+    pub fn index(self) -> usize {
+        match self {
+            Role::Source => 0,
+            Role::Background => 1,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Source => "Source",
+            Role::Background => "Background",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Params {
@@ -269,6 +424,8 @@ pub struct Params {
     pub glow: GlowParams,
     pub raster: RasterParams,
     pub key: KeyParams,
+    pub source_video: VideoParams,
+    pub background_video: VideoParams,
 }
 
 /// Thresholds spaced evenly for `levels` levels (`k / levels`); unused entries are 1.
@@ -387,6 +544,8 @@ impl Default for Params {
                 enabled: false,
                 levels: 1,
             },
+            source_video: VideoParams::default(),
+            background_video: VideoParams::default(),
         }
     }
 }
@@ -495,7 +654,28 @@ impl Params {
 
         // Levels the colorizer doesn't have can't be see-through.
         self.key.keep_levels(self.colorize.levels);
+
+        for v in [&mut self.source_video, &mut self.background_video] {
+            clamp(&mut v.speed, ranges::PLAY_SPEED);
+            clamp(&mut v.position, ranges::POSITION);
+            clamp(&mut v.delay, ranges::DELAY);
+            clamp(&mut v.slit_depth, ranges::SLIT_DEPTH);
+        }
         self
+    }
+
+    pub fn video(&self, role: Role) -> &VideoParams {
+        match role {
+            Role::Source => &self.source_video,
+            Role::Background => &self.background_video,
+        }
+    }
+
+    pub fn video_mut(&mut self, role: Role) -> &mut VideoParams {
+        match role {
+            Role::Source => &mut self.source_video,
+            Role::Background => &mut self.background_video,
+        }
     }
 }
 
@@ -597,6 +777,36 @@ mod tests {
         assert!(ranges::BEAM_WIDTH.contains(&p.raster.beam_width));
         assert!(ranges::COMPENSATION.contains(&p.raster.compensation));
         assert!(ranges::SPEED_COMPENSATION.contains(&p.raster.speed_compensation));
+        for v in [p.source_video, p.background_video] {
+            assert!(ranges::PLAY_SPEED.contains(&v.speed));
+            assert!(ranges::POSITION.contains(&v.position));
+            assert!(ranges::DELAY.contains(&v.delay));
+            assert!(ranges::SLIT_DEPTH.contains(&v.slit_depth));
+        }
+    }
+
+    #[test]
+    fn video_settings_default_to_looping_at_normal_speed() {
+        let v = VideoParams::default();
+        assert_eq!((v.mode, v.speed, v.position), (PlayMode::Loop, 1.0, 0.0));
+        assert_eq!((v.between, v.delay), (Between::Blend, 0.0));
+        assert_eq!((v.slit, v.slit_depth, v.slit_flip), (Slit::Off, 1.0, false));
+        let p = Params::default();
+        assert_eq!(*p.video(Role::Source), v);
+        assert_eq!(*p.video(Role::Background), v);
+    }
+
+    #[test]
+    fn video_settings_are_clamped() {
+        let mut p = Params::default();
+        let v = p.video_mut(Role::Background);
+        v.speed = -9.0;
+        v.position = 1.5;
+        v.delay = 99.0;
+        v.slit_depth = -1.0;
+        let v = p.clamped().background_video;
+        assert_eq!((v.speed, v.position), (-4.0, 1.0));
+        assert_eq!((v.delay, v.slit_depth), (30.0, 0.0));
     }
 
     #[test]
