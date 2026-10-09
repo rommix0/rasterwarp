@@ -3,6 +3,8 @@
 
 pub mod analysis;
 pub mod file;
+pub mod input;
+pub mod output;
 
 use std::ops::RangeInclusive;
 
