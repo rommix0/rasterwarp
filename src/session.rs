@@ -1,7 +1,7 @@
 //! A project: the whole session in one file. It holds the mode, both transition banks,
-//! the sequence, user curves, canvas size, frame rate and inputs (files and cameras),
-//! but nothing in motion (ramp progress, the sequence's position, phases, video clocks,
-//! trails, camera buffers).
+//! the sequence, user curves, canvas size, frame rate, inputs (files and cameras) and
+//! audio, but nothing in motion (ramp progress, the sequence's position, phases, video
+//! clocks, trails, camera buffers).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::audio::{Shaping, SourceChoice};
+use crate::audio_links::{AudioLink, BeatLink};
 use crate::canvas;
 use crate::curve::{CurveLibrary, CurveRef, CustomCurve};
 use crate::motion::{Mode, Motion};
@@ -34,6 +36,82 @@ pub struct Project {
     pub frame_rate: FrameRate,
     #[serde(flatten)]
     pub inputs: InputFiles,
+    /// The sound source, its settings and the audio links.
+    pub audio: AudioProject,
+}
+
+/// The project's audio: the source, its shaping and playback, and the audio links.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioProject {
+    #[serde(with = "saved_source")]
+    pub source: SourceChoice,
+    #[serde(flatten)]
+    pub shaping: Shaping,
+    /// The speakers' volume, 0 to 1.
+    pub volume: f32,
+    /// Whether a sound file wraps to the start at its end.
+    #[serde(rename = "loop")]
+    pub looping: bool,
+    /// Whether Record restarts the sound file from its start.
+    pub start_with_recording: bool,
+    /// The output device's name; empty for the system default.
+    pub output: String,
+    #[serde(with = "crate::audio_links::saved_follow")]
+    pub follow: Vec<AudioLink>,
+    #[serde(with = "crate::audio_links::saved_beats")]
+    pub beats: Vec<BeatLink>,
+}
+
+impl Default for AudioProject {
+    fn default() -> Self {
+        Self {
+            source: SourceChoice::None,
+            shaping: Shaping::default(),
+            volume: 1.0,
+            looping: true,
+            start_with_recording: true,
+            output: String::new(),
+            follow: Vec::new(),
+            beats: Vec::new(),
+        }
+    }
+}
+
+impl AudioProject {
+    /// A copy with every setting held in range (a file could hold anything).
+    pub fn checked(&self) -> AudioProject {
+        AudioProject {
+            shaping: self.shaping.clamped(),
+            volume: if self.volume.is_finite() {
+                self.volume.clamp(0.0, 1.0)
+            } else {
+                1.0
+            },
+            ..self.clone()
+        }
+    }
+}
+
+/// Saving the audio source as one string (see [`SourceChoice::saved`]). One this version
+/// doesn't know reads as no source.
+mod saved_source {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::audio::SourceChoice;
+
+    pub fn serialize<S: Serializer>(source: &SourceChoice, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&source.saved())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<SourceChoice, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        let source = value.as_str().and_then(SourceChoice::from_saved);
+        if source.is_none() {
+            log::warn!("ignoring an audio source this version doesn't know: {value}");
+        }
+        Ok(source.unwrap_or_default())
+    }
 }
 
 /// A camera input as a project saves it.
@@ -158,6 +236,7 @@ impl Default for Project {
             canvas: canvas::DEFAULT,
             frame_rate: FrameRate::default(),
             inputs: InputFiles::default(),
+            audio: AudioProject::default(),
         }
     }
 }
@@ -211,6 +290,8 @@ impl Project {
             canvas,
             frame_rate,
             inputs: inputs.clone(),
+            // The audio is the app's to fill in; it isn't part of the motion.
+            audio: AudioProject::default(),
         }
     }
 
@@ -250,12 +331,15 @@ impl Project {
         } else {
             FrameRate::default()
         };
-        Self::capture(
-            &self.motion(),
-            canvas::sanitize(self.canvas, u32::MAX),
-            rate,
-            &self.inputs.checked(),
-        )
+        Self {
+            audio: self.audio.checked(),
+            ..Self::capture(
+                &self.motion(),
+                canvas::sanitize(self.canvas, u32::MAX),
+                rate,
+                &self.inputs.checked(),
+            )
+        }
     }
 }
 
@@ -687,5 +771,77 @@ mod tests {
         assert_eq!((camera.name.as_str(), camera.buffer_seconds), ("Cam", 30.0));
         let p = project_with(|j| j["source_camera"] = json!({"name": "Cam"}));
         assert_eq!(p.inputs.source_camera.unwrap().buffer_seconds, 10.0);
+    }
+
+    fn with_audio() -> Project {
+        use crate::audio::{Beat, Signal, SourceChoice};
+        use crate::audio_links::{AudioLink, BeatLink};
+        use crate::control::{Action, Target};
+        use crate::params::table::SliderId;
+        let mut p = project();
+        p.audio = AudioProject {
+            source: SourceChoice::File("C:/music/drums.wav".into()),
+            volume: 0.5,
+            looping: false,
+            follow: vec![AudioLink {
+                signal: Signal::Bass,
+                slider: SliderId::Zoom,
+                depth: 0.5,
+            }],
+            beats: vec![BeatLink {
+                beat: Beat::Bass,
+                target: Target::Action(Action::Cut),
+            }],
+            ..AudioProject::default()
+        };
+        p
+    }
+
+    #[test]
+    fn audio_is_saved_in_one_block() {
+        let value = serde_json::to_value(with_audio()).unwrap();
+        let audio = &value["audio"];
+        assert_eq!(audio["source"], "file:C:/music/drums.wav");
+        assert_eq!(audio["gain"], 1.0);
+        assert_eq!(audio["loop"], false);
+        assert_eq!(audio["start_with_recording"], true);
+        assert_eq!(audio["output"], "");
+        assert_eq!(audio["follow"][0]["target"], "slider:warp.zoom");
+        assert_eq!(audio["beats"][0]["target"], "action:cut");
+        let back: Project = serde_json::from_value(value).unwrap();
+        assert_eq!(back, with_audio());
+    }
+
+    #[test]
+    fn a_project_without_audio_has_none() {
+        let p = project_with(|v| {
+            v.as_object_mut().unwrap().remove("audio");
+        });
+        assert_eq!(p.audio, AudioProject::default());
+    }
+
+    #[test]
+    fn unknown_audio_entries_are_dropped_and_the_rest_load() {
+        let p = project_with(|v| {
+            let audio = serde_json::to_value(&with_audio().audio).unwrap();
+            v["audio"] = audio;
+            v["audio"]["source"] = "radio:bbc".into();
+            v["audio"]["gain"] = 1000.0.into();
+            v["audio"]["follow"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({ "signal": "sub-bass", "target": "slider:warp.zoom" }));
+        });
+        assert_eq!(p.audio.source, crate::audio::SourceChoice::None);
+        assert_eq!(p.audio.follow.len(), 1);
+        assert_eq!(p.audio.beats.len(), 1);
+        assert_eq!(p.audio.checked().shaping.gain, *crate::audio::GAIN.end());
+    }
+
+    #[test]
+    fn checking_keeps_the_audio() {
+        let p = with_audio();
+        assert_eq!(p.checked().audio, p.audio.checked());
+        assert_eq!(p.checked().checked(), p.checked());
     }
 }
