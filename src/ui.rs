@@ -8,14 +8,17 @@ use crate::canvas::{CanvasChoice, PRESETS};
 use crate::capture::CaptureMode;
 use crate::capture::encode::VideoFormat;
 use crate::capture::recorder::{RecordSettings, RecordStatus};
+use crate::control::Links;
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::files_ui::{self, FileActions, FilesUi};
 use crate::inputs_ui::{self, InputActions, InputUi};
+use crate::link_ui;
 use crate::midi_ui::MidiUi;
 use crate::motion::{Mode, Motion};
+use crate::params::table::{ChoiceId, OscSlider, SliderId};
 use crate::params::{
-    Axis, Envelope, OscInput, OscSync, Oscillator, Params, Role, Waveform, even_thresholds, ranges,
+    Envelope, OSCILLATOR_COUNT, OscInput, OscSync, Params, Role, Waveform, even_thresholds, ranges,
 };
 use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
@@ -179,7 +182,8 @@ pub fn draw(
                         role,
                         &mut state.inputs[role.index()],
                         state.cameras.as_deref(),
-                        motion.editable().video_mut(role),
+                        motion.editable(),
+                        &mut state.midi.links,
                         &mut actions.inputs,
                     );
                 }
@@ -191,12 +195,13 @@ pub fn draw(
                 );
                 curves_section(ui, &mut motion.curves, state);
                 let params = motion.editable();
-                warp_section(ui, params);
-                raster_section(ui, params);
-                colorize_section(ui, params);
+                let links = &mut state.midi.links;
+                warp_section(ui, params, links);
+                raster_section(ui, params, links);
+                colorize_section(ui, params, links);
                 key_section(ui, params);
-                feedback_section(ui, params, &mut actions);
-                glow_section(ui, params);
+                feedback_section(ui, params, links, &mut actions);
+                glow_section(ui, params, links);
             });
         });
     // The panel's edge can also be dragged shut or open.
@@ -561,152 +566,131 @@ fn curves_section(ui: &mut Ui, curves: &mut CurveLibrary, state: &mut UiState) {
     });
 }
 
-fn warp_section(ui: &mut Ui, params: &mut Params) {
-    let warp = &mut params.warp;
+fn warp_section(ui: &mut Ui, params: &mut Params, links: &mut Links) {
     CollapsingHeader::new("Deflection")
         .default_open(true)
         .show(ui, |ui| {
-            ui.add(Slider::new(&mut warp.zoom, ranges::ZOOM).text("zoom"));
-            ui.add(Slider::new(&mut warp.rotation, ranges::ROTATION).text("rotation"));
-            ui.add(Slider::new(&mut warp.offset[0], ranges::OFFSET).text("offset x"));
-            ui.add(Slider::new(&mut warp.offset[1], ranges::OFFSET).text("offset y"));
-            ui.add(Slider::new(&mut warp.drift, ranges::DRIFT).text("analog drift"));
-            ui.add(Slider::new(&mut warp.axis_wander, ranges::AXIS_WANDER).text("axis wander"));
-            ui.add(
-                Slider::new(&mut warp.line_jitter, ranges::LINE_JITTER).text("line jitter (px)"),
-            );
+            for (id, text) in [
+                (SliderId::Zoom, "zoom"),
+                (SliderId::Rotation, "rotation"),
+                (SliderId::OffsetX, "offset x"),
+                (SliderId::OffsetY, "offset y"),
+                (SliderId::Drift, "analog drift"),
+                (SliderId::AxisWander, "axis wander"),
+                (SliderId::LineJitter, "line jitter (px)"),
+            ] {
+                link_ui::slider(ui, links, params, id, text);
+            }
             ui.checkbox(
-                &mut warp.slave_4_to_3,
+                &mut params.warp.slave_4_to_3,
                 "Slave osc 4 to osc 3 (sine/cosine pair)",
             );
-            let slaved = warp.slave_4_to_3;
-            for (i, osc) in warp.oscillators.iter_mut().enumerate() {
+            let slaved = params.warp.slave_4_to_3;
+            for i in 0..OSCILLATOR_COUNT {
                 // A slaved oscillator 4 keeps only its own target, amplitude and envelope.
                 let follows = slaved && i == 3;
                 CollapsingHeader::new(format!("Oscillator {}", i + 1))
                     .default_open(i == 0)
                     .show(ui, |ui| {
                         ui.horizontal(|ui| {
-                            ui.selectable_value(&mut osc.target, Axis::X, "→ X");
-                            ui.selectable_value(&mut osc.target, Axis::Y, "→ Y");
-                            ComboBox::from_id_salt(("envelope", i))
-                                .selected_text(format!("{:?}", osc.envelope))
-                                .show_ui(ui, |ui| {
-                                    for e in Envelope::ALL {
-                                        ui.selectable_value(&mut osc.envelope, e, format!("{e:?}"));
-                                    }
-                                });
+                            link_ui::option(ui, links, params, ChoiceId::Axis(i), 0, "→ X");
+                            link_ui::option(ui, links, params, ChoiceId::Axis(i), 1, "→ Y");
+                            let envelopes = Envelope::ALL.map(|e| format!("{e:?}"));
+                            link_ui::combo(ui, links, params, ChoiceId::Envelope(i), &envelopes);
                         });
-                        ui.add(
-                            Slider::new(&mut osc.amplitude, ranges::AMPLITUDE).text("amplitude"),
+                        link_ui::slider(
+                            ui,
+                            links,
+                            params,
+                            SliderId::Osc(i, OscSlider::Amplitude),
+                            "amplitude",
                         );
-                        ui.add_enabled_ui(!follows, |ui| oscillator_shape(ui, i, osc));
+                        ui.add_enabled_ui(!follows, |ui| oscillator_shape(ui, i, params, links));
                     });
             }
         });
 }
 
 /// The controls a slaved oscillator 4 takes from oscillator 3.
-fn oscillator_shape(ui: &mut Ui, i: usize, osc: &mut Oscillator) {
+fn oscillator_shape(ui: &mut Ui, i: usize, params: &mut Params, links: &mut Links) {
     ui.horizontal(|ui| {
-        ComboBox::from_id_salt(("waveform", i))
-            .selected_text(format!("{:?}", osc.waveform))
-            .show_ui(ui, |ui| {
-                for w in Waveform::ALL {
-                    ui.selectable_value(&mut osc.waveform, w, format!("{w:?}"));
-                }
-            });
-        ComboBox::from_id_salt(("input", i))
-            .selected_text(format!("by {:?}", osc.input))
-            .show_ui(ui, |ui| {
-                for input in OscInput::ALL {
-                    ui.selectable_value(&mut osc.input, input, format!("by {input:?}"));
-                }
-            });
-        ComboBox::from_id_salt(("sync", i))
-            .selected_text(format!("{:?} sync", osc.sync))
-            .show_ui(ui, |ui| {
-                for sync in OscSync::ALL {
-                    ui.selectable_value(&mut osc.sync, sync, format!("{sync:?} sync"));
-                }
-            });
+        let waveforms = Waveform::ALL.map(|w| format!("{w:?}"));
+        link_ui::combo(ui, links, params, ChoiceId::Waveform(i), &waveforms);
+        let inputs = OscInput::ALL.map(|input| format!("by {input:?}"));
+        link_ui::combo(ui, links, params, ChoiceId::Input(i), &inputs);
+        let syncs = OscSync::ALL.map(|sync| format!("{sync:?} sync"));
+        link_ui::combo(ui, links, params, ChoiceId::Sync(i), &syncs);
     });
-    ui.add(Slider::new(&mut osc.frequency, ranges::FREQUENCY).text("frequency"));
-    ui.add(Slider::new(&mut osc.phase, ranges::PHASE).text("phase"));
-    ui.add(Slider::new(&mut osc.phase_speed, ranges::PHASE_SPEED).text("phase speed"));
-    ui.add(Slider::new(&mut osc.lfo_rate, ranges::LFO_RATE).text("LFO rate"));
-    ui.add(Slider::new(&mut osc.lfo_depth, ranges::LFO_DEPTH).text("LFO depth"));
+    for (slider, text) in [
+        (OscSlider::Frequency, "frequency"),
+        (OscSlider::Phase, "phase"),
+        (OscSlider::PhaseSpeed, "phase speed"),
+        (OscSlider::LfoRate, "LFO rate"),
+        (OscSlider::LfoDepth, "LFO depth"),
+    ] {
+        link_ui::slider(ui, links, params, SliderId::Osc(i, slider), text);
+    }
 }
 
-fn raster_section(ui: &mut Ui, params: &mut Params) {
-    let r = &mut params.raster;
+fn raster_section(ui: &mut Ui, params: &mut Params, links: &mut Links) {
     CollapsingHeader::new("Raster").show(ui, |ui| {
-        ui.checkbox(&mut r.enabled, "True raster (scan lines)")
+        ui.checkbox(&mut params.raster.enabled, "True raster (scan lines)")
             .on_hover_text(
                 "Draws the source as real scan lines bent by the oscillators. Warp mode \
                  maps each pixel back to the source and raster mode maps each line forward, \
                  so the same settings give mirror-image ripples.",
             );
-        ui.add_enabled_ui(r.enabled, |ui| {
-            ui.add(Slider::new(&mut r.lines, ranges::RASTER_LINES).text("lines"));
-            ui.add(Slider::new(&mut r.beam_width, ranges::BEAM_WIDTH).text("beam width (px)"));
-            ui.add(
-                Slider::new(&mut r.compensation, ranges::COMPENSATION).text("area compensation"),
-            );
-            ui.add(
-                Slider::new(&mut r.speed_compensation, ranges::SPEED_COMPENSATION)
-                    .text("speed compensation"),
-            );
+        ui.add_enabled_ui(params.raster.enabled, |ui| {
+            for (id, text) in [
+                (SliderId::RasterLines, "lines"),
+                (SliderId::BeamWidth, "beam width (px)"),
+                (SliderId::Compensation, "area compensation"),
+                (SliderId::SpeedCompensation, "speed compensation"),
+            ] {
+                link_ui::slider(ui, links, params, id, text);
+            }
         });
     });
 }
 
-fn colorize_section(ui: &mut Ui, params: &mut Params) {
-    let key = &mut params.key;
-    let c = &mut params.colorize;
+fn colorize_section(ui: &mut Ui, params: &mut Params, links: &mut Links) {
     CollapsingHeader::new("Colorize")
         .default_open(true)
         .show(ui, |ui| {
-            ui.checkbox(&mut c.bypass, "Bypass (grayscale)");
+            ui.checkbox(&mut params.colorize.bypass, "Bypass (grayscale)");
             // A new level count starts from evenly spaced thresholds, and levels that are
-            // gone stop being see-through.
-            if ui
-                .add(Slider::new(&mut c.levels, ranges::LEVELS).text("levels"))
-                .changed()
-            {
-                c.thresholds = even_thresholds(c.levels);
-                key.keep_levels(c.levels);
-            }
+            // gone stop being see-through: the slider's setter does both.
+            link_ui::slider(ui, links, params, SliderId::Levels, "levels");
             ui.horizontal(|ui| {
                 ui.label("Thresholds");
                 if ui.button("Even").clicked() {
-                    c.thresholds = even_thresholds(c.levels);
+                    params.colorize.thresholds = even_thresholds(params.colorize.levels);
                 }
             });
-            let used = c.levels as usize - 1;
+            let used = params.colorize.levels as usize - 1;
             for k in 0..used {
                 // Shown to 3 decimals but not rounded: a slider that rounds its value
                 // changes the look just by being drawn (and it would always look unsaved).
-                let slider = Slider::new(&mut c.thresholds[k], ranges::THRESHOLD)
-                    .custom_formatter(|v, _| format!("{v:.3}"))
-                    .text(format!("level {} from", k + 2));
-                if ui.add(slider).changed() {
-                    // A threshold can't pass its neighbours.
-                    let lo = if k == 0 { 0.0 } else { c.thresholds[k - 1] };
-                    let hi = if k + 1 < used {
-                        c.thresholds[k + 1]
-                    } else {
-                        1.0
-                    };
-                    c.thresholds[k] = c.thresholds[k].clamp(lo, hi);
-                }
+                link_ui::slider_shown(
+                    ui,
+                    links,
+                    params,
+                    SliderId::LevelFrom(k),
+                    &format!("level {} from", k + 2),
+                    ranges::THRESHOLD,
+                    |s| s.custom_formatter(|v, _| format!("{v:.3}")),
+                );
             }
-            ui.add(Slider::new(&mut c.softness, ranges::SOFTNESS).text("softness"));
-            ui.add(Slider::new(&mut c.bandwidth, ranges::BANDWIDTH).text("edge fringe (px)"));
-            ui.add(Slider::new(&mut c.ringing, ranges::RINGING).text("ringing"));
-            ui.add(Slider::new(&mut c.cycle_speed, ranges::CYCLE_SPEED).text("cycle speed"));
+            for (id, text) in [
+                (SliderId::Softness, "softness"),
+                (SliderId::Fringe, "edge fringe (px)"),
+                (SliderId::Ringing, "ringing"),
+                (SliderId::CycleSpeed, "cycle speed"),
+            ] {
+                link_ui::slider(ui, links, params, id, text);
+            }
             ui.horizontal_wrapped(|ui| {
-                for color in &mut c.palette {
+                for color in &mut params.colorize.palette {
                     // The button edits a copy: its color conversion isn't exact, and only
                     // a real edit may change the look.
                     let mut edited = *color;
@@ -739,39 +723,38 @@ fn key_section(ui: &mut Ui, params: &mut Params) {
     });
 }
 
-fn feedback_section(ui: &mut Ui, params: &mut Params, actions: &mut UiActions) {
-    let f = &mut params.feedback;
+fn feedback_section(ui: &mut Ui, params: &mut Params, links: &mut Links, actions: &mut UiActions) {
     CollapsingHeader::new("Feedback")
         .default_open(true)
         .show(ui, |ui| {
-            ui.add(Slider::new(&mut f.amount, ranges::FEEDBACK_AMOUNT).text("amount"));
-            ui.add(Slider::new(&mut f.zoom, ranges::FEEDBACK_ZOOM).text("zoom"));
-            ui.add(Slider::new(&mut f.rotation, ranges::FEEDBACK_ROTATION).text("rotation"));
-            ui.add(Slider::new(&mut f.offset[0], ranges::FEEDBACK_OFFSET).text("offset x"));
-            ui.add(Slider::new(&mut f.offset[1], ranges::FEEDBACK_OFFSET).text("offset y"));
+            for (id, text) in [
+                (SliderId::FeedbackAmount, "amount"),
+                (SliderId::FeedbackZoom, "zoom"),
+                (SliderId::FeedbackRotation, "rotation"),
+                (SliderId::FeedbackOffsetX, "offset x"),
+                (SliderId::FeedbackOffsetY, "offset y"),
+            ] {
+                link_ui::slider(ui, links, params, id, text);
+            }
             if ui.button("Clear trails").clicked() {
                 actions.clear_feedback = true;
             }
         });
 }
 
-fn glow_section(ui: &mut Ui, params: &mut Params) {
-    let g = &mut params.glow;
+fn glow_section(ui: &mut Ui, params: &mut Params, links: &mut Links) {
     CollapsingHeader::new("Glow & CRT")
         .default_open(true)
         .show(ui, |ui| {
-            ui.add(Slider::new(&mut g.bloom_intensity, ranges::BLOOM_INTENSITY).text("bloom"));
-            ui.add(
-                Slider::new(&mut g.bloom_threshold, ranges::BLOOM_THRESHOLD)
-                    .text("bloom threshold"),
-            );
-            ui.add(
-                Slider::new(&mut g.scanline_strength, ranges::SCANLINE_STRENGTH).text("scanlines"),
-            );
-            ui.add(
-                Slider::new(&mut g.scanline_count, ranges::SCANLINE_COUNT).text("scanline count"),
-            );
-            ui.add(Slider::new(&mut g.chroma, ranges::CHROMA).text("chroma bleed"));
-            ui.add(Slider::new(&mut g.noise, ranges::NOISE).text("noise"));
+            for (id, text) in [
+                (SliderId::Bloom, "bloom"),
+                (SliderId::BloomThreshold, "bloom threshold"),
+                (SliderId::Scanlines, "scanlines"),
+                (SliderId::ScanlineCount, "scanline count"),
+                (SliderId::ChromaBleed, "chroma bleed"),
+                (SliderId::Noise, "noise"),
+            ] {
+                link_ui::slider(ui, links, params, id, text);
+            }
         });
 }

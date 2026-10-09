@@ -4,8 +4,11 @@
 
 use egui::{CollapsingHeader, ComboBox, Slider, Ui};
 
+use crate::control::Links;
 use crate::inputs::Kind;
-use crate::params::{Between, PlayMode, Role, Slit, VideoParams, ranges};
+use crate::link_ui;
+use crate::params::table::{ChoiceId, SliderId, VideoSlider};
+use crate::params::{Between, Params, PlayMode, Role, Slit, ranges};
 use crate::video::camera::{BUFFER_SECONDS, DEFAULT_BUFFER_SECONDS};
 
 /// What an input's section shows, kept between frames.
@@ -86,13 +89,15 @@ pub fn loop_key(role: Role) -> egui::Key {
 }
 
 /// The Source or Background section. `cameras` is the listed devices (none until
-/// listed); `video` is the edited bank's playback settings for this input.
+/// listed); `params` is the edited bank, whose playback settings for this input the
+/// section edits, and `links` are the MIDI links its controls can take.
 pub fn input_section(
     ui: &mut Ui,
     role: Role,
     state: &mut InputUi,
     cameras: Option<&[String]>,
-    video: &mut VideoParams,
+    params: &mut Params,
+    links: &mut Links,
     actions: &mut InputActions,
 ) {
     CollapsingHeader::new(role.label())
@@ -128,7 +133,7 @@ pub fn input_section(
                 ui.small(line);
             }
             if state.running != Kind::Image {
-                playback(ui, role, state, video, actions);
+                playback(ui, role, state, params, links, actions);
             }
         });
 }
@@ -185,7 +190,8 @@ fn playback(
     ui: &mut Ui,
     role: Role,
     state: &InputUi,
-    v: &mut VideoParams,
+    params: &mut Params,
+    links: &mut Links,
     actions: &mut InputActions,
 ) {
     ui.separator();
@@ -211,27 +217,38 @@ fn playback(
     }
     if state.running == Kind::Video || state.looping.is_some() {
         ui.horizontal(|ui| {
-            for mode in PlayMode::ALL {
-                ui.selectable_value(&mut v.mode, mode, mode.label());
+            for (option, mode) in PlayMode::ALL.into_iter().enumerate() {
+                link_ui::option(
+                    ui,
+                    links,
+                    params,
+                    ChoiceId::PlayMode(role),
+                    option,
+                    mode.label(),
+                );
             }
         });
-        if v.mode == PlayMode::Scrub {
-            ui.add(Slider::new(&mut v.position, ranges::POSITION).text("position"));
+        if params.video(role).mode == PlayMode::Scrub {
+            let position = SliderId::Video(role, VideoSlider::Position);
+            link_ui::slider(ui, links, params, position, "position");
         } else {
-            ui.add(Slider::new(&mut v.speed, ranges::PLAY_SPEED).text("speed"))
+            let speed = SliderId::Video(role, VideoSlider::Speed);
+            link_ui::slider(ui, links, params, speed, "speed")
                 .on_hover_text("× the frame rate it was filmed at; negative plays backwards");
         }
     } else {
         // Shown up to the buffer length; a longer delay from a file shows the oldest
-        // frame. Only an edit changes the value, so drawing it isn't a change.
+        // frame.
         let buffer = state.buffer_seconds.min(*ranges::DELAY.end());
-        let mut delay = v.delay.min(buffer);
-        if ui
-            .add(Slider::new(&mut delay, 0.0..=buffer).text("delay (s)"))
-            .changed()
-        {
-            v.delay = delay;
-        }
+        link_ui::slider_shown(
+            ui,
+            links,
+            params,
+            SliderId::Video(role, VideoSlider::Delay),
+            "delay (s)",
+            0.0..=buffer,
+            |s| s,
+        );
         let length = state.loop_length;
         if ui
             .add_enabled(
@@ -252,17 +269,25 @@ fn playback(
     }
     ui.horizontal(|ui| {
         ui.label("Between frames");
-        for between in Between::ALL {
-            ui.selectable_value(&mut v.between, between, between.label());
+        for (option, between) in Between::ALL.into_iter().enumerate() {
+            let choice = ChoiceId::Between(role);
+            link_ui::option(ui, links, params, choice, option, between.label());
         }
     });
     ui.horizontal(|ui| {
         ui.label("Slit-scan");
-        for slit in Slit::ALL {
-            ui.selectable_value(&mut v.slit, slit, slit.label());
+        for (option, slit) in Slit::ALL.into_iter().enumerate() {
+            link_ui::option(
+                ui,
+                links,
+                params,
+                ChoiceId::Slit(role),
+                option,
+                slit.label(),
+            );
         }
     });
-    if v.slit == Slit::Off {
+    if params.video(role).slit == Slit::Off {
         return;
     }
     let deepest = state
@@ -270,17 +295,19 @@ fn playback(
         .unwrap_or(*ranges::SLIT_DEPTH.end())
         .min(*ranges::SLIT_DEPTH.end());
     // Shown up to the deepest the ring allows; a deeper value from a file is used at
-    // that depth. Only an edit changes the value.
-    let mut depth = v.slit_depth.min(deepest);
-    if ui
-        .add(Slider::new(&mut depth, 0.0..=deepest).text("depth (s)"))
-        .on_hover_text(format!("Up to {deepest:.1} s fits in the GPU's frame ring"))
-        .changed()
-    {
-        v.slit_depth = depth;
-    }
-    ui.checkbox(&mut v.slit_flip, "Flip");
-    if v.slit == Slit::Map {
+    // that depth.
+    link_ui::slider_shown(
+        ui,
+        links,
+        params,
+        SliderId::Video(role, VideoSlider::SlitDepth),
+        "depth (s)",
+        0.0..=deepest,
+        |s| s,
+    )
+    .on_hover_text(format!("Up to {deepest:.1} s fits in the GPU's frame ring"));
+    ui.checkbox(&mut params.video_mut(role).slit_flip, "Flip");
+    if params.video(role).slit == Slit::Map {
         ui.horizontal(|ui| {
             if ui.button("Map image…").clicked() {
                 actions.choose_map = Some(role);
