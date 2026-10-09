@@ -1,6 +1,7 @@
 //! Clips: a video file decoded whole into memory on a worker thread, so every frame is
 //! there at once for playing backwards, scrubbing and slit-scan.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -39,6 +40,18 @@ fn name(path: &Path) -> String {
     )
 }
 
+/// A refusal for want of memory. It already names the file, so [`load`] adds nothing to it.
+#[derive(Debug)]
+struct OutOfMemory(String);
+
+impl fmt::Display for OutOfMemory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for OutOfMemory {}
+
 /// Decodes the first video stream of `path` into frames for a `canvas`-sized canvas.
 /// `progress` counts up to 1000 as it goes; setting `cancel` stops it.
 pub fn load(
@@ -50,8 +63,13 @@ pub fn load(
     cancel: &AtomicBool,
 ) -> Result<Clip> {
     let name = name(path);
-    decode(path, &name, pixels, canvas, budget, progress, cancel)
-        .with_context(|| format!("could not open {name}"))
+    decode(path, &name, pixels, canvas, budget, progress, cancel).map_err(|err| {
+        if err.is::<OutOfMemory>() {
+            err
+        } else {
+            err.context(format!("could not open {name}"))
+        }
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -90,17 +108,33 @@ fn decode(
             (seconds * fps).ceil() as u64
         }
     };
+    // Why `frames` frames can't be had: more than the budget ever allows, or more than is
+    // free while the other input holds its share.
     let too_big = |frames: u64| {
-        anyhow!(
-            "{name} needs {} of memory; shorten it or lower the canvas size",
-            describe_bytes(frames * format.frame_bytes())
-        )
+        let needed = frames.saturating_mul(format.frame_bytes());
+        let message = if needed > budget.limit() {
+            format!(
+                "{name} needs {} of memory; shorten it or lower the canvas size",
+                describe_bytes(needed)
+            )
+        } else {
+            format!(
+                "{name} needs {} of memory and only {} is free; clear the current source or \
+                 background first, shorten it, or lower the canvas size",
+                describe_bytes(needed),
+                describe_bytes(budget.available())
+            )
+        };
+        anyhow::Error::new(OutOfMemory(message))
     };
-    let mut memory = budget
-        .take(expected * format.frame_bytes())
+    let claim = expected
+        .checked_mul(format.frame_bytes())
         .ok_or_else(|| too_big(expected))?;
+    let mut memory = budget.take(claim).ok_or_else(|| too_big(expected))?;
     let mut converter = Converter::new(format);
-    let mut frames = Vec::with_capacity(expected as usize);
+    // The file's count is only a claim, so start from no more than the budget could hold.
+    let hint = expected.min(budget.limit() / format.frame_bytes().max(1));
+    let mut frames = Vec::with_capacity(hint as usize);
     let mut decoded = ff::frame::Video::empty();
     let mut receive = |decoder: &mut ff::decoder::Video, frames: &mut Vec<Frame>| -> Result<()> {
         while decoder.receive_frame(&mut decoded).is_ok() {

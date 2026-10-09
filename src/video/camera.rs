@@ -90,6 +90,8 @@ pub struct Buffered {
 struct Shared {
     status: Status,
     format: Option<Format>,
+    /// The device's frame rate, once it has opened.
+    fps: f64,
     frames: VecDeque<Buffered>,
     /// Said when the buffer had to be shorter than asked.
     note: Option<String>,
@@ -117,6 +119,7 @@ impl Camera {
         let shared = Arc::new(Mutex::new(Shared {
             status: Status::Opening,
             format: None,
+            fps: FALLBACK_FPS,
             frames: VecDeque::new(),
             note: None,
             memory: None,
@@ -155,6 +158,16 @@ impl Camera {
         lock(&self.shared).format
     }
 
+    /// The device's frame rate (a guess until it has opened).
+    pub fn fps(&self) -> f64 {
+        lock(&self.shared).fps
+    }
+
+    /// Whether a picture has arrived since the camera last (re)opened.
+    pub fn has_frames(&self) -> bool {
+        !lock(&self.shared).frames.is_empty()
+    }
+
     /// A note about the buffer, if it had to be shorter than asked.
     pub fn note(&self) -> Option<String> {
         lock(&self.shared).note.clone()
@@ -184,8 +197,12 @@ impl Camera {
 
 impl Drop for Camera {
     fn drop(&mut self) {
-        // The thread notices at its next frame or retry and exits on its own.
+        // The thread notices at its next frame or retry and exits on its own, however long
+        // that takes; the buffer's memory goes back now.
         self.stop.store(true, Ordering::Relaxed);
+        let mut shared = lock(&self.shared);
+        shared.frames.clear();
+        shared.memory = None;
     }
 }
 
@@ -315,6 +332,7 @@ impl Capture {
             )
         });
         shared.format = Some(format);
+        shared.fps = fps;
         Ok(frames as usize)
     }
 }

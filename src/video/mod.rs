@@ -114,6 +114,11 @@ impl Budget {
         }
     }
 
+    /// The most this budget allows in all.
+    pub fn limit(&self) -> u64 {
+        self.limit
+    }
+
     /// Bytes not yet taken.
     pub fn available(&self) -> u64 {
         self.limit.saturating_sub(self.used.load(Ordering::Acquire))

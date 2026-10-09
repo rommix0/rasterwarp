@@ -188,15 +188,18 @@ impl Input {
         self.content = Content::Still;
         self.loading = None;
         self.format = None;
+        self.held = None;
         self.info = info;
     }
 
     /// Switches to the camera `choice`. Its picture appears with its first frame.
     pub fn open_camera(&mut self, choice: &CameraChoice, canvas: (u32, u32), budget: &Budget) {
         self.loading = None;
-        // The old camera's memory goes back first, so the new buffer can use it.
+        // Dropping the old camera gives its buffer's memory back at once, so the new
+        // buffer can use it.
         self.content = Content::Still;
         self.format = None;
+        self.held = None;
         let camera = Camera::open(
             &choice.name,
             Pixels::for_role(self.role),
@@ -241,13 +244,14 @@ impl Input {
             }
         }
         self.format = Some(format);
+        self.held = None;
         self.playback = [Playback::default(); 2];
         self.modes = [None; 2];
     }
 
     /// Takes over a clip that finished loading, and makes frames passes for a camera
-    /// that has opened (or reopened in another format). Returns the clip's path when
-    /// one took over, or why it failed to load.
+    /// once it has a picture (or reopened in another format), so what was showing stays
+    /// until then. Returns the clip's path when one took over, or why it failed to load.
     pub fn poll(
         &mut self,
         device: &wgpu::Device,
@@ -255,10 +259,18 @@ impl Input {
         renderers: [&mut Renderer; 2],
     ) -> Option<Result<PathBuf>> {
         if let Content::Camera(camera) = &self.content
+            && camera.has_frames()
             && let Some(format) = camera.format()
             && self.format != Some(format)
         {
+            let (w, h) = format.size;
+            let info = format!(
+                "{}: {w}×{h} at {} fps",
+                camera.name,
+                describe_fps(camera.fps())
+            );
             self.make_passes(device, queue, renderers, format);
+            self.info = info;
             return None;
         }
         let result = self.loading.as_ref()?.poll()?;
@@ -293,9 +305,9 @@ impl Input {
         v: &VideoFrame,
         paused: bool,
     ) {
-        if self.format.is_none() {
+        let Some(format) = self.format else {
             return;
-        }
+        };
         let Some(pass) = renderer.frames_mut(self.role) else {
             return;
         };
@@ -319,6 +331,11 @@ impl Input {
                 sample
             }
             Content::Camera(camera) => {
+                // A camera that reopened in another size is fed again once `poll` has
+                // remade the passes for it.
+                if camera.format() != Some(format) {
+                    return;
+                }
                 let arrivals = camera.arrivals();
                 let Some(newest) = arrivals.last() else {
                     return;
@@ -333,6 +350,10 @@ impl Input {
                 };
                 for k in pass.missing(device, &sample) {
                     if let Some(frame) = camera.frame(k) {
+                        // One from a reopening between the check above and now.
+                        if frame.full.len() as u64 != format.bytes_at(pass.size()) {
+                            continue;
+                        }
                         pass.upload(queue, k, if small { &frame.small } else { &frame.full });
                     }
                 }

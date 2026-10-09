@@ -105,10 +105,27 @@ fn clips_over_the_memory_budget_are_refused() {
     let err = load(&path, Pixels::Rgba, (1920, 1080), &budget).unwrap_err();
     let message = format!("{err:#}");
     assert!(
-        message.contains("clip.mkv needs 11 MB of memory; shorten it or lower the canvas size"),
+        message == "clip.mkv needs 11 MB of memory; shorten it or lower the canvas size",
         "{message}"
     );
     assert_eq!(budget.available(), 1 << 20);
+}
+
+#[test]
+fn clips_that_fit_but_not_beside_the_other_input_say_what_is_free() {
+    let path = temp_file("clip-free", "clip.mkv");
+    write_clip(&path);
+    let budget = Budget::new(20 << 20);
+    let other = budget.take(15 << 20).unwrap();
+    let err = load(&path, Pixels::Rgba, (1920, 1080), &budget).unwrap_err();
+    let message = format!("{err:#}");
+    assert_eq!(
+        message,
+        "clip.mkv needs 11 MB of memory and only 5 MB is free; clear the current source or background first, shorten it, or lower the canvas size"
+    );
+    assert_eq!(budget.available(), 5 << 20);
+    drop(other);
+    load(&path, Pixels::Rgba, (1920, 1080), &budget).expect("fits once the other is cleared");
 }
 
 #[test]
