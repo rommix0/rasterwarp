@@ -1,5 +1,7 @@
 //! The analysis shared by live input and sound files: band filters, envelope followers
-//! with attack and release, and beat (onset) detection, one sample at a time.
+//! with attack and release, and beat (onset) detection, one sample at a time. Beats are
+//! found on each band's fixed fast envelope, not on the shaped value, so attack and
+//! release change how the signals move but never when a beat fires.
 
 use std::f32::consts::TAU;
 
@@ -14,6 +16,12 @@ pub const TREBLE_BOTTOM: f32 = 2000.0;
 const DETECTOR: f32 = 0.02;
 /// How long the slow average that beats are compared against takes, in seconds.
 const SLOW: f32 = 1.0;
+/// After a beat a band fires again only once its fast envelope has fallen back below its
+/// slow average, or below this fraction of the peak it reached since the beat. The first
+/// lets a band re-arm in the gaps between hits; the second lets it re-arm over a steady
+/// bed (a held bass note under kicks) whose level keeps the slow average high. A steady
+/// tone never falls that far, so it fires once, when it starts.
+const REARM: f32 = 0.7;
 /// A band fires at most this often, in seconds.
 pub const HOLD_OFF: f32 = 0.1;
 /// Below this a band never fires (quiet hiss, and the faint broadband snap where a hard-cut
@@ -28,8 +36,8 @@ fn coefficient(seconds: f32, rate: f32) -> f32 {
     1.0 - (-1.0 / (seconds * rate).max(f32::EPSILON)).exp()
 }
 
-/// How far above its slow average a band must jump to fire, for a sensitivity of 0
-/// (3×) to 1 (1.2×).
+/// How far above its slow average a band's fast envelope must jump to fire: 3 − 1.8 ×
+/// sensitivity, so 3× at sensitivity 0, 2.1× at the default 0.5 and 1.2× at 1.
 fn jump_ratio(sensitivity: f32) -> f32 {
     3.0 - 1.8 * sensitivity.clamp(0.0, 1.0)
 }
@@ -103,14 +111,17 @@ impl Biquad {
 #[derive(Clone, Copy, Debug)]
 struct Band {
     filter: Biquad,
-    /// The detector's mean square.
+    /// The detector's mean square; its level is the fixed fast envelope beats are found
+    /// on, whatever the shaping.
     power: f32,
     /// The follower's output: the band's value before gain.
     value: f32,
-    /// The slow average of `value` that jumps are measured against.
+    /// The slow average of the fast envelope that jumps are measured against.
     slow: f32,
-    /// Whether the band has fallen back below its threshold since it last fired.
+    /// Whether the band has fallen back (see [`REARM`]) since it last fired.
     armed: bool,
+    /// The highest fast envelope since the band last fired.
+    peak: f32,
     /// Seconds since the band last fired.
     since: f32,
 }
@@ -123,6 +134,7 @@ impl Band {
             value: 0.0,
             slow: 0.0,
             armed: true,
+            peak: 0.0,
             since: HOLD_OFF,
         }
     }
@@ -191,16 +203,21 @@ impl Analyzer {
                 self.release
             };
             band.value += (level - band.value) * k;
-            band.slow += (band.value - band.slow) * self.slow;
+            band.slow += (level - band.slow) * self.slow;
             band.since += self.dt;
-            let threshold = band.slow * self.ratio;
-            if band.value > threshold.max(FLOOR) {
-                if band.armed && band.since >= HOLD_OFF {
-                    *fired = true;
-                    band.since = 0.0;
+            if !band.armed {
+                band.peak = band.peak.max(level);
+            }
+            if level > (band.slow * self.ratio).max(FLOOR) {
+                if band.armed {
+                    if band.since >= HOLD_OFF {
+                        *fired = true;
+                        band.since = 0.0;
+                    }
+                    band.peak = level;
                 }
                 band.armed = false;
-            } else if band.value <= threshold {
+            } else if level <= band.slow || level <= band.peak * REARM {
                 band.armed = true;
             }
         }
@@ -346,5 +363,87 @@ mod tests {
         let mut a = Analyzer::new(RATE, Shaping::default());
         let (_, beats) = run(&mut a, &sine(1000.0, 1.0, 3.0));
         assert_eq!(beats[Beat::Any.index()], 1);
+    }
+
+    /// Kick drums at 120 bpm for `seconds` (a 60 Hz thump at 0.8 that dies away over
+    /// 80 ms), over a steady 50 Hz bed of amplitude `bed`.
+    fn kicks(seconds: f32, bed: f32) -> Vec<f32> {
+        let mut out = sine(50.0, bed, seconds);
+        let every = RATE as usize / 2;
+        let thump = (0.15 * RATE as f32) as usize;
+        for start in (0..out.len()).step_by(every) {
+            for (i, x) in out[start..].iter_mut().take(thump).enumerate() {
+                let t = i as f32 / RATE as f32;
+                *x += 0.8 * (TAU * 60.0 * t).sin() * (-t / 0.08).exp();
+            }
+        }
+        out
+    }
+
+    /// The times, in seconds, at which `samples` fire `beat`.
+    fn beat_times(shaping: Shaping, samples: &[f32], beat: Beat) -> Vec<f32> {
+        let mut a = Analyzer::new(RATE, shaping);
+        let mut times = Vec::new();
+        for (i, &x) in samples.iter().enumerate() {
+            if a.push(x)[beat.index()] {
+                times.push(i as f32 / RATE as f32);
+            }
+        }
+        times
+    }
+
+    #[test]
+    fn attack_and_release_never_move_the_beats() {
+        let samples = kicks(6.0, 0.0);
+        let default = beat_times(Shaping::default(), &samples, Beat::Bass);
+        assert_eq!(default.len(), 12, "one per kick: {default:?}");
+        for shaping in [
+            Shaping {
+                release: 0.15,
+                ..Shaping::default()
+            },
+            Shaping {
+                release: 2.0,
+                ..Shaping::default()
+            },
+            Shaping {
+                attack: 0.001,
+                ..Shaping::default()
+            },
+            Shaping {
+                attack: 0.2,
+                ..Shaping::default()
+            },
+        ] {
+            assert_eq!(
+                beat_times(shaping, &samples, Beat::Bass),
+                default,
+                "{shaping:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kicks_over_a_bass_bed_fire_on_each_kick() {
+        // Once the slow average has settled (after the first second), at least 10 of the
+        // 12 kicks fire at the default sensitivity.
+        let times = beat_times(Shaping::default(), &kicks(7.0, 0.3), Beat::Bass);
+        let settled = times.iter().filter(|&&t| t >= 1.0).count();
+        assert!(settled >= 10, "{settled} of 12: {times:?}");
+    }
+
+    #[test]
+    fn a_steady_low_tone_fires_at_most_once_even_at_full_sensitivity() {
+        let keen = Shaping {
+            sensitivity: 1.0,
+            ..Shaping::default()
+        };
+        for freq in [40.0, 60.0] {
+            let samples = sine(freq, 1.0, 3.0);
+            for beat in [Beat::Bass, Beat::Any] {
+                let times = beat_times(keen, &samples, beat);
+                assert!(times.len() <= 1, "{freq} Hz {beat:?}: {times:?}");
+            }
+        }
     }
 }
