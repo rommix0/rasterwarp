@@ -7,4 +7,5 @@
 /xtras/
 /icon/*
 !/icon/rasterwarp.ico
+!/icon/rasterwarp_title.png
 /dist/

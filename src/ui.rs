@@ -112,6 +112,53 @@ const SAVE_STILL: egui::KeyboardShortcut =
 const TOGGLE_PANEL: egui::KeyboardShortcut =
     egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Tab);
 
+/// The panel's title: the white "rasterwarp" wordmark.
+const TITLE_PNG: &[u8] = include_bytes!("../icon/rasterwarp_title.png");
+
+/// How tall the title wordmark is drawn, in points: the size of the heading text it replaced.
+const TITLE_HEIGHT: f32 = 18.0;
+
+/// The panel's title, tinted to the theme's heading color; the plain heading if the
+/// wordmark can't be decoded.
+fn title(ui: &mut Ui) {
+    let id = egui::Id::new("rasterwarp title");
+    let texture = ui
+        .ctx()
+        .data_mut(|d| d.get_temp::<Option<egui::TextureHandle>>(id));
+    let texture = texture.unwrap_or_else(|| {
+        let texture = match image::load_from_memory(TITLE_PNG) {
+            Ok(png) => {
+                let png = png.to_rgba8();
+                let size = [png.width() as usize, png.height() as usize];
+                let pixels = egui::ColorImage::from_rgba_unmultiplied(size, png.as_raw());
+                Some(
+                    ui.ctx()
+                        .load_texture("title", pixels, egui::TextureOptions::LINEAR),
+                )
+            }
+            Err(err) => {
+                log::warn!("no title image: {err}");
+                None
+            }
+        };
+        ui.ctx().data_mut(|d| d.insert_temp(id, texture.clone()));
+        texture
+    });
+    match texture {
+        Some(texture) => {
+            let size = texture.size_vec2() * (TITLE_HEIGHT / texture.size_vec2().y);
+            ui.add(
+                egui::Image::new((texture.id(), size))
+                    .tint(ui.visuals().strong_text_color())
+                    .alt_text("Rasterwarp"),
+            );
+        }
+        None => {
+            ui.heading("Rasterwarp");
+        }
+    }
+}
+
 pub fn draw(
     ui: &mut Ui,
     motion: &mut Motion,
@@ -145,7 +192,7 @@ pub fn draw(
         .default_size(320.0)
         .show_collapsible(ui, &mut open, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Rasterwarp");
+                title(ui);
                 ui.small("Developed by Anthony C. Bartman (@rommix0)");
                 ui.label(format!(
                     "{} · display {:.0} Hz · {} late",
