@@ -15,6 +15,9 @@ use cpal::{FromSample, SampleFormat, SizedSample};
 const GAP: Duration = Duration::from_millis(50);
 /// At most this much silence is filled at once.
 const MAX_FILL: Duration = Duration::from_secs(1);
+/// At most this much of a backlog is kept when draining (the newest), so a main thread
+/// that was blocked neither grows memory without limit nor analyses stale sound.
+const MAX_BACKLOG: Duration = Duration::from_secs(1);
 
 /// Which kind of live source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +71,12 @@ pub fn silence_to_fill(last: Instant, now: Instant, rate: u32) -> usize {
         return 0;
     }
     (gap.min(MAX_FILL).as_secs_f64() * f64::from(rate)).round() as usize
+}
+
+/// Drops all but the newest `keep` samples of `samples`.
+pub fn keep_newest(samples: &mut Vec<f32>, keep: usize) {
+    let excess = samples.len().saturating_sub(keep);
+    samples.drain(..excess);
 }
 
 /// An open live stream.
@@ -165,13 +174,19 @@ impl Live {
         self.rate
     }
 
-    /// Mono samples since the last call; when nothing came for more than 50 ms, zeros
-    /// for the silence.
+    /// Mono samples since the last call, at most the newest second of them; when
+    /// nothing came for more than 50 ms, zeros for the silence.
     pub fn drain(&mut self, now: Instant) -> Vec<f32> {
+        let keep = (MAX_BACKLOG.as_secs_f64() * f64::from(self.rate)).round() as usize;
         let mut out: Vec<f32> = Vec::new();
         for block in self.blocks.try_iter() {
             out.extend(block);
+            // Trimmed now and then, not per block, so a long backlog stays cheap.
+            if out.len() > 2 * keep {
+                keep_newest(&mut out, keep);
+            }
         }
+        keep_newest(&mut out, keep);
         if !out.is_empty() {
             self.last = now;
             return out;
@@ -217,6 +232,15 @@ mod tests {
             48_000,
             "at most a second is filled at once"
         );
+    }
+
+    #[test]
+    fn a_backlog_keeps_only_its_newest_samples() {
+        let mut samples: Vec<f32> = (0..10).map(|i| i as f32).collect();
+        keep_newest(&mut samples, 3);
+        assert_eq!(samples, [7.0, 8.0, 9.0]);
+        keep_newest(&mut samples, 5);
+        assert_eq!(samples, [7.0, 8.0, 9.0], "a short one is left alone");
     }
 
     #[test]

@@ -276,10 +276,14 @@ impl Audio {
             self.speaker_error = Some(format!("No sound output: {why}"));
             self.speakers = None;
         }
-        if let Some(tracks) = self.reanalysis.as_ref().and_then(Reanalysis::poll) {
+        if let Some(result) = self.reanalysis.as_ref().and_then(Reanalysis::poll) {
+            // Over either way, so later shaping changes start a new one.
             self.reanalysis = None;
             if let Current::File(file) = &mut self.current {
-                file.sound.tracks = tracks;
+                match result {
+                    Ok(tracks) => file.sound.tracks = tracks,
+                    Err(err) => log::warn!("could not re-analyse the sound: {err:#}"),
+                }
                 if std::mem::take(&mut self.reanalyse_again) {
                     self.reanalysis =
                         Some(Reanalysis::start(file.sound.samples.clone(), self.shaping));
@@ -904,6 +908,19 @@ mod tests {
         assert!(audio.speakers_missing(), "a file wants speakers it lacks");
         audio.current = Current::None;
         assert!(!audio.speakers_missing(), "no file, no speakers needed");
+    }
+
+    #[test]
+    fn a_stopped_reanalysis_is_over() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        audio.reanalysis = Some(Reanalysis::stopped());
+        audio.poll(Instant::now());
+        assert!(audio.reanalysis.is_none(), "a dead worker counts as done");
+        audio.set_shaping(Shaping {
+            release: 1.0,
+            ..Shaping::default()
+        });
+        assert!(audio.reanalysis.is_some(), "the next change analyses again");
     }
 
     #[test]

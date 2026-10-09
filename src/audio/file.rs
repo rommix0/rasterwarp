@@ -362,9 +362,21 @@ impl Reanalysis {
         Reanalysis { result }
     }
 
-    /// The new tracks, once ready.
-    pub fn poll(&self) -> Option<Tracks> {
-        self.result.try_recv().ok()
+    /// The new tracks once ready, or why there won't be any (the worker couldn't start
+    /// or stopped): either way the re-analysis is over.
+    pub fn poll(&self) -> Option<Result<Tracks>> {
+        match self.result.try_recv() {
+            Ok(tracks) => Some(Ok(tracks)),
+            Err(TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => Some(Err(anyhow!("the sound analysis stopped"))),
+        }
+    }
+
+    /// A re-analysis whose worker has already gone, as a failed spawn leaves it.
+    #[cfg(test)]
+    pub fn stopped() -> Reanalysis {
+        let (_, result) = mpsc::channel();
+        Reanalysis { result }
     }
 }
 
@@ -443,6 +455,25 @@ mod tests {
         assert_eq!(sound.slice(from, 4, true), [98, -98, 99, -99, 0, 0, 1, -1]);
         assert_eq!(sound.slice(from, 4, false), [98, -98, 99, -99, 0, 0, 0, 0]);
         assert_eq!(sound.slice(0.0, 2, false), [0, 0, 1, -1]);
+    }
+
+    #[test]
+    fn a_reanalysis_whose_worker_stopped_is_over() {
+        let stopped = Reanalysis::stopped().poll();
+        assert!(matches!(stopped, Some(Err(_))), "{stopped:?}");
+        let running = Reanalysis::start(clicks(1, 0.5).into(), Shaping::default());
+        let start = std::time::Instant::now();
+        let finished = loop {
+            if let Some(result) = running.poll() {
+                break result;
+            }
+            assert!(
+                start.elapsed().as_secs() < 10,
+                "the analysis never finished"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(finished.unwrap().values.len(), 500);
     }
 
     #[test]
