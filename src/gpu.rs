@@ -36,6 +36,22 @@ pub fn create_instance(backends: wgpu::Backends) -> wgpu::Instance {
     })
 }
 
+/// The backends tests use: the primary ones, without OpenGL. Starting OpenGL alongside
+/// Vulkan on several threads at once now and then deadlocks in the drivers.
+pub const TEST_BACKENDS: wgpu::Backends = wgpu::Backends::PRIMARY;
+
+/// An instance for tests, which open many devices at once on parallel threads. It uses
+/// [`TEST_BACKENDS`] and leaves out the backends' own validation layers: the D3D12 debug
+/// layer that `VALIDATION` turns on in debug builds now and then deadlocks when several
+/// threads open devices together. wgpu's own validation still runs.
+pub fn create_test_instance() -> wgpu::Instance {
+    wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: TEST_BACKENDS,
+        flags: wgpu::InstanceFlags::from_build_config() - wgpu::InstanceFlags::VALIDATION,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    })
+}
+
 /// Picks a high-performance adapter for `backends` and opens a device on it.
 pub async fn request_device(
     instance: &wgpu::Instance,
@@ -346,9 +362,8 @@ impl FullscreenPass {
 /// A GPU device for tests, or `None` (with a message) on machines without one.
 #[cfg(test)]
 pub(crate) fn test_device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let backends = wgpu::Backends::all();
-    let instance = create_instance(backends);
-    match pollster::block_on(request_device(&instance, backends, None)) {
+    let instance = create_test_instance();
+    match pollster::block_on(request_device(&instance, TEST_BACKENDS, None)) {
         Ok((_adapter, device, queue)) => Some((device, queue)),
         Err(err) => {
             eprintln!("skipping GPU test: {err:#}");

@@ -22,9 +22,8 @@ const OUT_W: u32 = 320;
 const OUT_H: u32 = 180;
 
 fn device() -> Option<(wgpu::Device, wgpu::Queue)> {
-    let backends = wgpu::Backends::all();
-    let instance = gpu::create_instance(backends);
-    match pollster::block_on(gpu::request_device(&instance, backends, None)) {
+    let instance = gpu::create_test_instance();
+    match pollster::block_on(gpu::request_device(&instance, gpu::TEST_BACKENDS, None)) {
         Ok((_adapter, device, queue)) => Some((device, queue)),
         Err(_) => {
             eprintln!("skipping smoke test: no GPU adapter available");
