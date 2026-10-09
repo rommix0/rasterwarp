@@ -369,6 +369,7 @@ impl State {
     /// shown instead, but its path stays in the session. Clips show once loaded, and
     /// cameras once they send a picture.
     fn apply_project(&mut self, project: &Project) {
+        self.audio.hold();
         self.motion = project.motion();
         if self.recorder.is_none() {
             let size = canvas::sanitize(project.canvas, self.max_texture_side);
@@ -576,6 +577,7 @@ impl State {
 
     /// Asks a yes/no question in a system dialog.
     fn confirm(&mut self, question: &str) -> bool {
+        self.audio.hold();
         let answer = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Rasterwarp")
@@ -595,6 +597,7 @@ impl State {
         if !self.unsaved(&self.project()) {
             return true;
         }
+        self.audio.hold();
         let answer = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Unsaved changes")
@@ -632,6 +635,7 @@ impl State {
     }
 
     fn ask_project_path(&mut self) -> Option<PathBuf> {
+        self.audio.hold();
         let mut dialog = rfd::FileDialog::new()
             .set_title("Save project")
             .add_filter("Rasterwarp project", &[PROJECT_EXTENSION])
@@ -664,6 +668,7 @@ impl State {
         let path = match path {
             Some(path) => path.to_path_buf(),
             None => {
+                self.audio.hold();
                 let picked = rfd::FileDialog::new()
                     .set_title("Open project")
                     .add_filter("Rasterwarp project", &[PROJECT_EXTENSION])
@@ -727,6 +732,7 @@ impl State {
     }
 
     fn choose_presets_folder(&mut self) {
+        self.audio.hold();
         let mut dialog = rfd::FileDialog::new().set_title("Presets folder");
         if let Ok(start) = std::path::absolute(&self.ui.presets_folder)
             && start.is_dir()
@@ -754,6 +760,7 @@ impl State {
     /// (see [`State::poll_inputs`]); until then the input shows what it did. The project
     /// remembers the file once it shows.
     fn open_file(&mut self, role: Role, path: &Path) {
+        self.audio.hold();
         if !is_image(path) {
             self.ui.load_error = None;
             self.feeds[role.index()].load(path, self.renderer.size(), &self.budget);
@@ -962,6 +969,7 @@ impl State {
     }
 
     fn list_cameras(&mut self) {
+        self.audio.hold();
         let listed = camera::list();
         // Listing can take a moment; that must not make canvas frames late.
         self.clock.reanchor(self.seconds());
@@ -974,6 +982,7 @@ impl State {
 
     /// Asks for an image or video file for `role` and opens it.
     fn choose_file(&mut self, role: Role) {
+        self.audio.hold();
         let picked = rfd::FileDialog::new()
             .set_title(format!("{} image or video", role.label()))
             .add_filter("Images and videos", MEDIA_EXTENSIONS)
@@ -1002,6 +1011,7 @@ impl State {
 
     /// Asks for a slit-scan map image for `role` and loads it.
     fn choose_map(&mut self, role: Role) {
+        self.audio.hold();
         let picked = rfd::FileDialog::new()
             .set_title("Slit-scan map image")
             .add_filter("Images", &["png", "jpg", "jpeg"])
@@ -1139,6 +1149,7 @@ impl State {
 
     /// Saves the canvas as it is now as a PNG in the captures folder.
     fn save_still(&mut self) {
+        self.audio.hold();
         let (device, queue, renderer) = (&self.device, &self.queue, &self.renderer);
         let (frame_params, time) = (&self.frame_params, self.time as f32);
         let size = renderer.size();
@@ -1167,6 +1178,7 @@ impl State {
     }
 
     fn start_recording(&mut self) {
+        self.audio.hold();
         self.ui.capture.saved = None;
         let started = Recorder::start(
             &self.device,
@@ -1195,6 +1207,7 @@ impl State {
         let Some(recorder) = self.recorder.take() else {
             return;
         };
+        self.audio.hold();
         self.ui.capture.status = None;
         let result = recorder.finish(&self.device);
         // Flushing the encoder stalls; that must not make canvas frames late.
@@ -1218,6 +1231,7 @@ impl State {
     }
 
     fn choose_capture_folder(&mut self) {
+        self.audio.hold();
         let folder = &mut self.ui.capture.settings.folder;
         let mut dialog = rfd::FileDialog::new().set_title("Capture folder");
         if let Ok(start) = std::path::absolute(&*folder)
@@ -1351,6 +1365,7 @@ impl State {
         // While the window is minimized or hidden no canvas frames are drawn; that time
         // must not count as late frames when it reappears.
         if self.config.width == 0 || self.config.height == 0 {
+            self.audio.hold();
             self.clock.reanchor(self.seconds());
             return; // minimized
         }
@@ -1358,6 +1373,7 @@ impl State {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+                self.audio.hold();
                 self.clock.reanchor(self.seconds());
                 return;
             }

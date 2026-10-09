@@ -4,6 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -13,6 +14,11 @@ use super::input::describe;
 
 /// How far, in seconds, the speakers may drift from the playhead before they jump.
 pub const SYNC: f64 = 0.04;
+
+/// How long the speakers play on without hearing from the engine. Past this the canvas
+/// has stalled (a dialog, a minimised window), so they go silent rather than run ahead
+/// of the playhead and jump back.
+const HOLD_AFTER: Duration = Duration::from_millis(200);
 
 /// What the speaker callback reads and the engine sets.
 pub struct Shared {
@@ -25,6 +31,10 @@ pub struct Shared {
     /// The volume's f32 bits.
     volume: AtomicU32,
     failure: Mutex<Option<String>>,
+    /// When the engine last called [`Shared::follow`].
+    origin: Instant,
+    /// That moment, in milliseconds since `origin`.
+    followed: AtomicU64,
 }
 
 impl Shared {
@@ -37,6 +47,8 @@ impl Shared {
             looping: AtomicBool::new(false),
             volume: AtomicU32::new(1.0f32.to_bits()),
             failure: Mutex::new(None),
+            origin: Instant::now(),
+            followed: AtomicU64::new(0),
         }
     }
 
@@ -49,6 +61,12 @@ impl Shared {
     /// scrub or a start lands exactly) or are more than [`SYNC`] away, and takes the
     /// playing state, looping and volume.
     pub fn follow(&self, seconds: f64, playing: bool, looping: bool, volume: f32) {
+        self.follow_at(Instant::now(), seconds, playing, looping, volume);
+    }
+
+    fn follow_at(&self, now: Instant, seconds: f64, playing: bool, looping: bool, volume: f32) {
+        let millis = now.saturating_duration_since(self.origin).as_millis() as u64;
+        self.followed.store(millis, Ordering::Relaxed);
         let wanted = (seconds.max(0.0) * f64::from(RATE)).round() as u64;
         let now = self.position();
         let stopped = !self.playing.load(Ordering::Relaxed);
@@ -63,8 +81,20 @@ impl Shared {
 
     /// Fills `out` (interleaved stereo f32) with what plays next.
     pub fn fill(&self, out: &mut [f32]) {
+        self.fill_at(Instant::now(), out);
+    }
+
+    /// [`Shared::fill`] at time `now`. If the engine hasn't followed for [`HOLD_AFTER`]
+    /// it plays nothing and stops, so the next follow jumps exactly.
+    fn fill_at(&self, now: Instant, out: &mut [f32]) {
         out.fill(0.0);
         if !self.playing.load(Ordering::Relaxed) {
+            return;
+        }
+        let since = now.saturating_duration_since(self.origin).as_millis() as u64;
+        let idle = since.saturating_sub(self.followed.load(Ordering::Relaxed));
+        if idle > HOLD_AFTER.as_millis() as u64 {
+            self.playing.store(false, Ordering::Relaxed);
             return;
         }
         let volume = f32::from_bits(self.volume.load(Ordering::Relaxed)) / 32768.0;
@@ -193,6 +223,29 @@ mod tests {
         let mut out = [9.0; 4];
         s.fill(&mut out);
         assert_eq!(out, [300.0 / 32768.0, -300.0 / 32768.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn speakers_the_engine_stops_following_go_silent_and_resume_exactly() {
+        let s = shared(4);
+        let t0 = s.origin;
+        let ms = |n| t0 + Duration::from_millis(n);
+        s.follow_at(ms(1000), 0.0, true, false, 1.0);
+        let mut out = [9.0; 2];
+        s.fill_at(ms(1100), &mut out);
+        assert_eq!(
+            out,
+            [0.0, 0.0],
+            "within the hold: plays (frame 0 is silent)"
+        );
+        assert_eq!(s.position(), 1);
+        s.fill_at(ms(1300), &mut out);
+        assert_eq!(out, [0.0; 2], "unheard from for too long: silent");
+        assert_eq!(s.position(), 1, "and the position stays");
+        s.follow_at(ms(1400), 2.0 / 48_000.0, true, false, 1.0);
+        assert_eq!(s.position(), 2, "the next follow lands exactly");
+        s.fill_at(ms(1410), &mut out);
+        assert_eq!(out, [200.0 / 32768.0, -200.0 / 32768.0]);
     }
 
     #[test]

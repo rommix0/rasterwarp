@@ -357,6 +357,14 @@ impl Audio {
         frame
     }
 
+    /// Stops the speakers where the playhead is, for when canvas frames are about to stop
+    /// coming (a dialog, a stall, a minimised window). The next advancing frame resumes
+    /// them exactly; without this they would play on and then jump back.
+    pub fn hold(&mut self) {
+        self.advancing = false;
+        self.sync_speakers();
+    }
+
     /// A hand beat, fired on the next canvas frame. A Bass or Treble tap is also Any.
     pub fn tap(&mut self, beat: Beat) {
         self.hand[beat.index()] = true;
@@ -735,6 +743,17 @@ mod tests {
         audio.set_muted(true);
         audio.frame(FRAME);
         assert!(!audio.speakers_playing(), "muted stops");
+    }
+
+    #[test]
+    fn holding_stops_the_speakers_until_the_next_moving_frame() {
+        let mut audio = with_sound(tone_then_rest(1.0, 1.0));
+        audio.frame(FRAME);
+        assert!(audio.speakers_playing());
+        audio.hold();
+        assert!(!audio.speakers_playing(), "held");
+        audio.frame(FRAME);
+        assert!(audio.speakers_playing(), "the next moving frame resumes");
     }
 
     #[test]
