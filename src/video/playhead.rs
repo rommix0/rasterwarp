@@ -9,6 +9,9 @@
 //!
 //! Slit-scan on a playing clip shows where the playhead actually was: each depth looks up
 //! the clip's [`Trail`], so slowing down, stopping and reversing all stay continuous.
+//!
+//! A camera loop holds the camera's last frames and plays them as a clip, starting on the
+//! frame that was on show (see [`loop_span`]).
 
 use std::collections::VecDeque;
 
@@ -67,6 +70,16 @@ pub struct Trail {
 }
 
 impl Trail {
+    /// The history of a playhead that has moved steadily at `fps` frames a second and
+    /// is about to reach `index` around `time`: a live camera's, carried into a loop. It
+    /// holds the point `keep` seconds back; recording the playhead's next position
+    /// completes the line, wherever between canvas frames the loop began.
+    pub fn approaching(time: f64, index: f64, fps: f64, keep: f64) -> Self {
+        let mut trail = Self::default();
+        trail.record(time - keep, index - keep * fps, keep);
+        trail
+    }
+
     /// Notes that the playhead is at `index` at `time`, keeping `keep` seconds of history.
     pub fn record(&mut self, time: f64, index: f64, keep: f64) {
         match self.points.back_mut() {
@@ -121,6 +134,14 @@ pub struct Playback {
 }
 
 impl Playback {
+    /// Playback that carries on from `index`, as it does when leaving Scrub.
+    pub fn continuing(index: f64) -> Self {
+        Self {
+            offset: None,
+            scrubbed: Some(index),
+        }
+    }
+
     /// The playhead's fractional virtual index for a clip of `count` frames at `fps`.
     /// Leaving Scrub carries on from the frame Scrub showed.
     pub fn index(&mut self, v: &VideoFrame, count: u32, fps: f64) -> f64 {
@@ -255,6 +276,17 @@ pub fn index_at(arrivals: &[Arrival], time: f64) -> f64 {
         0.0
     };
     a.seq as f64 + fraction * (b.seq - a.seq) as f64
+}
+
+/// The frames a camera loop of `seconds` holds, ending at the newest of `arrivals`:
+/// the first and last frame numbers, and where in the loop the playhead starts. It starts
+/// on the frame a delay of `seconds` is showing, so the picture carries on. None if that
+/// is under two frames.
+pub fn loop_span(arrivals: &[Arrival], seconds: f64) -> Option<(i64, i64, f64)> {
+    let newest = arrivals.last()?;
+    let start = index_at(arrivals, newest.time - seconds.max(0.0));
+    let first = start.floor() as i64;
+    (newest.seq > first).then_some((first, newest.seq, start - first as f64))
 }
 
 /// The camera's measured frame rate over the buffer.
@@ -535,5 +567,69 @@ mod tests {
         assert!(close(deep.behind[SLIT_STEPS - 1], 30.0));
         assert_eq!(deep.first, 100, "clamped to the oldest frame");
         assert!(camera_sample(&video(|_| {}), &[], 256).is_none());
+    }
+
+    #[test]
+    fn a_camera_loop_holds_the_delay_and_starts_on_the_frame_on_show() {
+        let times: Vec<f64> = (0..31).map(|i| i as f64 / 30.0).collect();
+        let a = arrivals(&times);
+        // Half a second: from the frame a 0.5 s delay shows up to the newest.
+        assert_eq!(loop_span(&a, 0.5), Some((115, 130, 0.0)));
+        // Between frames, the playhead starts part-way into the first.
+        let (first, last, start) = loop_span(&a, 0.51).unwrap();
+        assert_eq!((first, last), (114, 130));
+        assert!((start - 0.7).abs() < 1e-6);
+        assert_eq!(
+            loop_span(&a, 5.0),
+            Some((100, 130, 0.0)),
+            "the whole buffer"
+        );
+        assert_eq!(loop_span(&a, 0.02).map(|s| (s.0, s.1)), Some((129, 130)));
+        assert_eq!(loop_span(&a, 0.0), None, "one frame is no loop");
+        assert_eq!(loop_span(&[], 1.0), None);
+    }
+
+    #[test]
+    fn a_camera_loop_carries_on_from_the_frame_on_show() {
+        let mut playback = Playback::continuing(0.7);
+        let at = |clock| video(|v| v.clock = clock);
+        assert!((playback.index(&at(5.0), 16, 30.0) - 0.7).abs() < 1e-9);
+        assert!((playback.index(&at(5.5), 16, 30.0) - 15.7).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_camera_loop_carries_on_the_live_slit_scan() {
+        // Live at 30 fps reaches loop index 0.7 at time 8, where the loop plays it.
+        let mut trail = Trail::approaching(8.0, 0.7, 30.0, 2.0);
+        trail.record(8.0, 0.7, 2.0);
+        assert!((trail.at(0.0).unwrap() - 0.7).abs() < 1e-9);
+        assert!((trail.at(1.0).unwrap() + 29.3).abs() < 1e-9);
+        let v = video(|v| {
+            v.slit = Slit::Rows;
+            v.slit_depth = 1.0;
+        });
+        let sample = clip_sample(&v, 0.7, &trail, 16, 30.0, 256);
+        for (got, live) in sample.behind.iter().zip(straight_behind(30.0)) {
+            assert!(close(*got, f64::from(live)), "{got} for {live}");
+        }
+    }
+
+    #[test]
+    fn slit_scan_stays_continuous_across_a_loop_point() {
+        // A 16-frame loop playing at 30 fps for 3 s wraps several times.
+        let mut trail = Trail::default();
+        let index = play(&mut trail, 0.0, 3.0, |t| 30.0 * t);
+        let v = video(|v| {
+            v.slit = Slit::Rows;
+            v.slit_depth = 1.0;
+        });
+        let sample = clip_sample(&v, index, &trail, 16, 30.0, 256);
+        for (i, pair) in sample.behind.windows(2).enumerate() {
+            let step = pair[1] - pair[0];
+            assert!(
+                (step - 30.0 / 63.0).abs() < 1e-3,
+                "row {i} jumps by {step} frames"
+            );
+        }
     }
 }

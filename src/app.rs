@@ -784,6 +784,10 @@ impl State {
             };
             state.max_depth = feed.max_depth(&mut self.renderer);
             state.map = self.inputs.get(role).slit_map.as_deref().map(file_name);
+            state.looping = feed.looping();
+            state.loop_length = self.frame_params.video[role.index()]
+                .delay
+                .clamp(0.0, state.buffer_seconds);
         }
     }
 
@@ -808,12 +812,32 @@ impl State {
         if let Some(role) = actions.choose_map {
             self.choose_map(role);
         }
+        if let Some(role) = actions.toggle_loop {
+            if self.feeds[role.index()].looping().is_some() {
+                self.feeds[role.index()].release_loop();
+            } else {
+                self.grab_loop(role);
+            }
+        }
+        if let Some(role) = actions.grab_loop {
+            self.grab_loop(role);
+        }
+        if let Some(role) = actions.release_loop {
+            self.feeds[role.index()].release_loop();
+        }
         if let Some(role) = actions.clear_map {
             let _ = self.open_map(role, None);
             let mut file = self.inputs.get(role);
             file.slit_map = None;
             self.inputs.set(role, file);
         }
+    }
+
+    /// Loops `role`'s camera for the delay on screen, or says why it can't.
+    fn grab_loop(&mut self, role: Role) {
+        let video = self.frame_params.video[role.index()];
+        let grabbed = self.feeds[role.index()].grab_loop(&video, self.time, &self.budget);
+        self.ui.load_error = grabbed.err().map(|err| format!("{err:#}"));
     }
 
     fn list_cameras(&mut self) {

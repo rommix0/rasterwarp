@@ -3,20 +3,23 @@
 //! their frames to the renderers every canvas frame.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
 use crate::blend::VideoFrame;
 use crate::params::{PlayMode, Role, Slit, ranges};
 use crate::passes::Renderer;
+use crate::passes::frames::FramesPass;
 use crate::session::CameraChoice;
 use crate::source::GrayImage;
 use crate::video::camera::{Camera, Status};
 use crate::video::clip::{Clip, Loading};
 use crate::video::playhead::{
-    self, Playback, Trail, camera_sample, clip_frame, clip_sample, max_layers,
+    self, Arrival, Playback, Sample, Trail, camera_sample, clip_frame, clip_sample, loop_span,
+    max_layers,
 };
-use crate::video::{Budget, Format, Pixels};
+use crate::video::{Budget, Format, Frame, Pixels, Reservation, describe_bytes};
 
 /// What an input can be.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -63,6 +66,59 @@ impl View {
     }
 }
 
+/// A camera's last frames, held to play as a clip.
+#[derive(Debug)]
+struct Looped {
+    frames: Vec<Arc<Frame>>,
+    /// The camera's measured frame rate while they arrived.
+    fps: f64,
+    /// The loop's length.
+    seconds: f32,
+    /// The memory the frames take from the budget. They're the camera's too, but outlive
+    /// its buffer, so they're counted again.
+    _memory: Reservation,
+}
+
+impl Looped {
+    /// Holds `frames` of `frame_bytes` each, if the budget has room.
+    fn hold(
+        frames: Vec<Arc<Frame>>,
+        fps: f64,
+        seconds: f32,
+        frame_bytes: u64,
+        budget: &Budget,
+    ) -> Result<Self> {
+        let needed = frame_bytes.saturating_mul(frames.len() as u64);
+        let Some(memory) = budget.take(needed) else {
+            bail!(
+                "A {seconds:.1} s loop needs {} of memory and only {} is free; shorten the \
+                 delay or the camera buffer",
+                describe_bytes(needed),
+                describe_bytes(budget.available())
+            );
+        };
+        Ok(Self {
+            frames,
+            fps,
+            seconds,
+            _memory: memory,
+        })
+    }
+
+    fn count(&self) -> u32 {
+        self.frames.len() as u32
+    }
+}
+
+/// What virtual indices meant when a view's frame ring was filled.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Filled {
+    /// A live camera's frame numbers.
+    Live,
+    /// Frames of a clip, or of loop number `take`, played in `mode`.
+    Frames { take: u64, mode: PlayMode },
+}
+
 enum Content {
     /// An image, already on the renderers.
     Still,
@@ -80,8 +136,12 @@ pub struct Input {
     playback: [Playback; 2],
     /// Where each view's clip playhead has been, for slit-scan.
     trails: [Trail; 2],
-    /// The play mode each view's frame ring was filled for.
-    modes: [Option<PlayMode>; 2],
+    /// What each view's frame ring was filled for.
+    filled: [Option<Filled>; 2],
+    /// A camera's loop, playing instead of the live picture.
+    looped: Option<Looped>,
+    /// Loops taken so far: each one's frames are new.
+    takes: u64,
     /// The format the renderers' frames passes were made for.
     format: Option<Format>,
     map: Option<GrayImage>,
@@ -126,7 +186,9 @@ impl Input {
             loading: None,
             playback: [Playback::default(); 2],
             trails: Default::default(),
-            modes: [None; 2],
+            filled: [None; 2],
+            looped: None,
+            takes: 0,
             format: None,
             map: None,
             held: None,
@@ -167,10 +229,11 @@ impl Input {
 
     /// The deepest slit-scan the canvas's frame ring allows, in seconds.
     pub fn max_depth(&self, renderer: &mut Renderer) -> Option<f32> {
-        let fps = match &self.content {
-            Content::Still => return None,
-            Content::Clip(clip) => clip.fps,
-            Content::Camera(camera) => playhead::camera_fps(&camera.arrivals()),
+        let fps = match (&self.content, &self.looped) {
+            (Content::Still, _) => return None,
+            (Content::Clip(clip), _) => clip.fps,
+            (Content::Camera(_), Some(looped)) => looped.fps,
+            (Content::Camera(camera), None) => playhead::camera_fps(&camera.arrivals()),
         };
         let layers = renderer.frames_mut(self.role)?.max_layers();
         Some(playhead::max_depth(layers, fps))
@@ -194,6 +257,7 @@ impl Input {
         self.loading = None;
         self.format = None;
         self.held = None;
+        self.looped = None;
         self.info = info;
     }
 
@@ -205,6 +269,7 @@ impl Input {
         self.content = Content::Still;
         self.format = None;
         self.held = None;
+        self.looped = None;
         let camera = Camera::open(
             &choice.name,
             Pixels::for_role(self.role),
@@ -252,7 +317,67 @@ impl Input {
         self.held = None;
         self.playback = [Playback::default(); 2];
         self.trails = Default::default();
-        self.modes = [None; 2];
+        self.filled = [None; 2];
+        // A camera that reopened in another format can't play its old frames.
+        self.looped = None;
+    }
+
+    /// How long the camera's loop is, while it loops.
+    pub fn looping(&self) -> Option<f32> {
+        self.looped.as_ref().map(|l| l.seconds)
+    }
+
+    /// Loops the camera's last `v.delay` seconds (up to where a paused camera stopped),
+    /// replacing any loop. It plays like a clip from the frame the delay was showing, so
+    /// the picture carries on, and slit-scan carries on from the live one. `time` is the
+    /// animation time.
+    pub fn grab_loop(&mut self, v: &VideoFrame, time: f64, budget: &Budget) -> Result<()> {
+        let Content::Camera(camera) = &self.content else {
+            bail!("Only a camera can loop");
+        };
+        let Some(format) = self.format else {
+            bail!("The camera has no picture to loop yet");
+        };
+        // Its memory goes back first, so the new loop can use it.
+        self.looped = None;
+        let arrivals = camera.arrivals();
+        let shown = self.shown(&arrivals);
+        let Some((first, last, start)) = loop_span(shown, f64::from(v.delay)) else {
+            bail!("Set a delay to choose the loop length");
+        };
+        let held = &shown[shown.partition_point(|a| a.seq < first)..];
+        let fps = playhead::camera_fps(held);
+        let seconds = (held[held.len() - 1].time - held[0].time) as f32;
+        let frames = camera
+            .frames(first, last)
+            .ok_or_else(|| anyhow!("The camera's buffer moved on; try again"))?;
+        self.looped = Some(Looped::hold(
+            frames,
+            fps,
+            seconds.min(v.delay),
+            format.frame_bytes(),
+            budget,
+        )?);
+        self.takes += 1;
+        self.held = None;
+        let keep = f64::from(*ranges::SLIT_DEPTH.end());
+        self.playback = [Playback::continuing(start); 2];
+        self.trails = std::array::from_fn(|_| Trail::approaching(time, start, fps, keep));
+        Ok(())
+    }
+
+    /// Goes back to the live camera, letting the loop's frames go.
+    pub fn release_loop(&mut self) {
+        self.looped = None;
+        self.held = None;
+    }
+
+    /// The camera frames on show: all of them, or up to where a paused camera stopped.
+    fn shown<'a>(&self, arrivals: &'a [Arrival]) -> &'a [Arrival] {
+        match self.held {
+            Some(time) => &arrivals[..arrivals.partition_point(|a| a.time <= time)],
+            None => arrivals,
+        }
     }
 
     /// Takes over a clip that finished loading, and makes frames passes for a camera
@@ -322,41 +447,53 @@ impl Input {
             return;
         };
         let small = view == View::Preview;
-        let mut sample = match &self.content {
-            Content::Still => return,
-            Content::Clip(clip) => {
-                let i = view.index();
-                if self.modes[i] != Some(v.mode) {
-                    // Virtual indices mean other frames in another mode.
-                    pass.forget();
-                    self.modes[i] = Some(v.mode);
-                }
-                let count = clip.count();
-                let index = self.playback[i].index(v, count, clip.fps);
-                let trail = &mut self.trails[i];
-                trail.record(time, index, f64::from(*ranges::SLIT_DEPTH.end()));
-                let sample = clip_sample(v, index, trail, count, clip.fps, pass.max_layers());
-                for k in pass.missing(device, &sample) {
-                    let frame = &clip.frames[clip_frame(v.mode, k, count) as usize];
-                    pass.upload(queue, k, if small { &frame.small } else { &frame.full });
-                }
-                sample
+        let i = view.index();
+        let (filled, playback, trail) = (
+            &mut self.filled[i],
+            &mut self.playback[i],
+            &mut self.trails[i],
+        );
+        let mut sample = match (&self.content, &self.looped) {
+            (Content::Still, _) => return,
+            (Content::Clip(clip), _) => {
+                let played = Played {
+                    take: 0,
+                    count: clip.count(),
+                    fps: clip.fps,
+                };
+                let frame = |f: u32| &clip.frames[f as usize];
+                played.feed(
+                    device, queue, pass, filled, playback, trail, v, time, small, frame,
+                )
             }
-            Content::Camera(camera) => {
+            (Content::Camera(_), Some(looped)) => {
+                let played = Played {
+                    take: self.takes,
+                    count: looped.count(),
+                    fps: looped.fps,
+                };
+                let frame = |f: u32| &*looped.frames[f as usize];
+                played.feed(
+                    device, queue, pass, filled, playback, trail, v, time, small, frame,
+                )
+            }
+            (Content::Camera(camera), None) => {
                 // A camera that reopened in another size is fed again once `poll` has
                 // remade the passes for it.
                 if camera.format() != Some(format) {
                     return;
+                }
+                if *filled != Some(Filled::Live) {
+                    // Virtual indices meant a loop's frames.
+                    pass.forget();
+                    *filled = Some(Filled::Live);
                 }
                 let arrivals = camera.arrivals();
                 let Some(newest) = arrivals.last() else {
                     return;
                 };
                 self.held = paused.then(|| self.held.unwrap_or(newest.time));
-                let shown = match self.held {
-                    Some(time) => &arrivals[..arrivals.partition_point(|a| a.time <= time)],
-                    None => &arrivals[..],
-                };
+                let shown = self.shown(&arrivals);
                 let Some(sample) = camera_sample(v, shown, pass.max_layers()) else {
                     return;
                 };
@@ -380,9 +517,73 @@ impl Input {
     }
 }
 
+/// Frames played like a clip: a clip's, or a camera loop's.
+struct Played {
+    /// Which loop the frames are (0 for a clip).
+    take: u64,
+    count: u32,
+    fps: f64,
+}
+
+impl Played {
+    /// Moves the playhead on, notes it in the trail, and uploads the frames the ring
+    /// lacks; `frame` gives frame `i` of the clip or loop.
+    #[allow(clippy::too_many_arguments)]
+    fn feed<'a>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &mut FramesPass,
+        filled: &mut Option<Filled>,
+        playback: &mut Playback,
+        trail: &mut Trail,
+        v: &VideoFrame,
+        time: f64,
+        small: bool,
+        frame: impl Fn(u32) -> &'a Frame,
+    ) -> Sample {
+        let fill = Filled::Frames {
+            take: self.take,
+            mode: v.mode,
+        };
+        if *filled != Some(fill) {
+            // Virtual indices mean other frames in another mode or loop.
+            pass.forget();
+            *filled = Some(fill);
+        }
+        let index = playback.index(v, self.count, self.fps);
+        trail.record(time, index, f64::from(*ranges::SLIT_DEPTH.end()));
+        let sample = clip_sample(v, index, trail, self.count, self.fps, pass.max_layers());
+        for k in pass.missing(device, &sample) {
+            let frame = frame(clip_frame(v.mode, k, self.count));
+            pass.upload(queue, k, if small { &frame.small } else { &frame.full });
+        }
+        sample
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_loop_takes_memory_from_the_budget_and_gives_it_back() {
+        let budget = Budget::new(1000);
+        let frame = Arc::new(Frame {
+            full: vec![0; 60],
+            small: vec![0; 40],
+        });
+        let frames = vec![frame; 8];
+        let looped = Looped::hold(frames.clone(), 30.0, 0.3, 100, &budget).unwrap();
+        assert_eq!(looped.count(), 8);
+        assert_eq!(budget.available(), 200);
+        let err = Looped::hold(frames, 30.0, 0.3, 100, &budget).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(message.contains("A 0.3 s loop needs"), "{message}");
+        assert!(message.contains("is free; shorten the delay"), "{message}");
+        drop(looped);
+        assert_eq!(budget.available(), 1000);
+    }
 
     #[test]
     fn files_open_as_images_by_extension() {

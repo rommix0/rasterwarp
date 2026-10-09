@@ -182,6 +182,22 @@ impl Camera {
             .collect()
     }
 
+    /// Frames `first` to `last`, if they're all still buffered.
+    pub fn frames(&self, first: i64, last: i64) -> Option<Vec<Arc<Frame>>> {
+        let shared = lock(&self.shared);
+        let oldest = shared.frames.front()?.arrival.seq;
+        let start = usize::try_from(first - oldest).ok()?;
+        let count = usize::try_from(last - first + 1).ok()?;
+        let frames: Vec<_> = shared
+            .frames
+            .range(start..)
+            .take(count)
+            .enumerate()
+            .map_while(|(i, b)| (b.arrival.seq == first + i as i64).then(|| b.frame.clone()))
+            .collect();
+        (frames.len() == count).then_some(frames)
+    }
+
     /// Frame number `seq`, if it's still buffered.
     pub fn frame(&self, seq: i64) -> Option<Arc<Frame>> {
         let shared = lock(&self.shared);

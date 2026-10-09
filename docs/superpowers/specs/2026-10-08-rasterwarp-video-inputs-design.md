@@ -15,7 +15,7 @@ Builds on: `docs/superpowers/specs/2026-10-07-rasterwarp-motion-output-look-desi
 - **Optical-flow interpolation:** dropped (2026-10-09). Nearest and Blend are the `Between frames` choices.
 - **Streaming long clips** from disk. Clips here are short loops held in memory.
 - **Audio** from video files or cameras.
-- **Play modes on the camera buffer:** loop, ping-pong or scrub over the last N seconds. Echo (several delayed copies mixed).
+- **Play modes on the camera buffer:** built since (2026-10-09) as the camera looper: "Loop last N s" (F9 for the source, F10 for the background) holds the last *delay* seconds and plays them like a clip, starting on the frame the delay was showing. Echo (several delayed copies mixed) is still later.
 - Video as a slit-scan map. Camera format or resolution choice (the device's default mode is used).
 
 ## Inputs
@@ -160,4 +160,4 @@ Every error is shown in the panel, and the previous input stays on screen.
 
 ## Later
 
-- Play modes and echo on the camera buffer; video as a slit-scan map; streaming long clips; audio; camera mode and resolution choice.
+- Echo on the camera buffer (its play modes are built: the camera looper); video as a slit-scan map; streaming long clips; audio; camera mode and resolution choice.

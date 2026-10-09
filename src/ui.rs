@@ -110,6 +110,14 @@ pub fn draw(
     if ui.input_mut(|i| i.consume_shortcut(&SAVE_STILL)) {
         actions.save_still = true;
     }
+    for role in Role::ALL {
+        let key = egui::KeyboardShortcut::new(egui::Modifiers::NONE, inputs_ui::loop_key(role));
+        if state.inputs[role.index()].running == crate::inputs::Kind::Camera
+            && ui.input_mut(|i| i.consume_shortcut(&key))
+        {
+            actions.inputs.toggle_loop = Some(role);
+        }
+    }
     if !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|i| i.consume_shortcut(&TOGGLE_PANEL))
     {
         state.panel_hidden = !state.panel_hidden;

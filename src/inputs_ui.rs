@@ -31,6 +31,10 @@ pub struct InputUi {
     pub max_depth: Option<f32>,
     /// The slit-scan map image's file name, if one is loaded.
     pub map: Option<String>,
+    /// A camera loop's length, while the camera loops.
+    pub looping: Option<f32>,
+    /// How long a loop taken now would be: the delay on screen.
+    pub loop_length: f32,
 }
 
 impl Default for InputUi {
@@ -46,6 +50,8 @@ impl Default for InputUi {
             buffer_seconds: DEFAULT_BUFFER_SECONDS,
             max_depth: None,
             map: None,
+            looping: None,
+            loop_length: 0.0,
         }
     }
 }
@@ -63,6 +69,20 @@ pub struct InputActions {
     pub clear_map: Option<Role>,
     /// List the cameras again.
     pub list_cameras: bool,
+    /// Loop the camera's last delay seconds, replacing any loop.
+    pub grab_loop: Option<Role>,
+    /// Go back to the live camera.
+    pub release_loop: Option<Role>,
+    /// Loop the camera, or go back to live if it loops (F9, F10).
+    pub toggle_loop: Option<Role>,
+}
+
+/// The key that loops `role`'s camera or lets its loop go.
+pub fn loop_key(role: Role) -> egui::Key {
+    match role {
+        Role::Source => egui::Key::F9,
+        Role::Background => egui::Key::F10,
+    }
 }
 
 /// The Source or Background section. `cameras` is the listed devices (none until
@@ -169,7 +189,27 @@ fn playback(
     actions: &mut InputActions,
 ) {
     ui.separator();
-    if state.running == Kind::Video {
+    let key = loop_key(role).name();
+    if let Some(seconds) = state.looping {
+        ui.horizontal(|ui| {
+            ui.label(format!("Looping {seconds:.1} s"));
+            if ui
+                .button("Back to live")
+                .on_hover_text(format!("Show the live camera again ({key})"))
+                .clicked()
+            {
+                actions.release_loop = Some(role);
+            }
+            if ui
+                .button("Loop again")
+                .on_hover_text("Loop the latest frames instead")
+                .clicked()
+            {
+                actions.grab_loop = Some(role);
+            }
+        });
+    }
+    if state.running == Kind::Video || state.looping.is_some() {
         ui.horizontal(|ui| {
             for mode in PlayMode::ALL {
                 ui.selectable_value(&mut v.mode, mode, mode.label());
@@ -179,7 +219,7 @@ fn playback(
             ui.add(Slider::new(&mut v.position, ranges::POSITION).text("position"));
         } else {
             ui.add(Slider::new(&mut v.speed, ranges::PLAY_SPEED).text("speed"))
-                .on_hover_text("× the clip's own frame rate; negative plays backwards");
+                .on_hover_text("× the frame rate it was filmed at; negative plays backwards");
         }
     } else {
         // Shown up to the buffer length; a longer delay from a file shows the oldest
@@ -191,6 +231,23 @@ fn playback(
             .changed()
         {
             v.delay = delay;
+        }
+        let length = state.loop_length;
+        if ui
+            .add_enabled(
+                length > 0.0,
+                egui::Button::new(format!("Loop last {length:.1} s")),
+            )
+            .on_hover_text(format!(
+                "Play the last {length:.1} s over and over, carrying on from what's on \
+                 screen ({key})"
+            ))
+            .clicked()
+        {
+            actions.grab_loop = Some(role);
+        }
+        if length <= 0.0 {
+            ui.small("Set a delay to choose the loop length.");
         }
     }
     ui.horizontal(|ui| {
