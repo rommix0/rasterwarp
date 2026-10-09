@@ -23,16 +23,18 @@ use crate::capture::still;
 use crate::clock::{CanvasClock, Pacing};
 use crate::files_ui::FileActions;
 use crate::gpu;
+use crate::inputs::{Input, View, is_image};
 use crate::motion::{Mode, Motion};
-use crate::params::Params;
+use crate::params::{Params, Role};
 use crate::passes::Renderer;
 use crate::passes::composite::Area;
 use crate::presets;
 use crate::preview::PreviewView;
 use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
-use crate::session::{self, Autosave, InputFiles, Project};
+use crate::session::{self, Autosave, InputFile, InputFiles, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
+use crate::video::{Budget, MEMORY_LIMIT};
 
 /// How often the session is autosaved (when it changed).
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(60);
@@ -149,6 +151,10 @@ struct State {
     /// The inputs' files and cameras, as a project saves them. A project's missing image
     /// keeps its path here, so saving doesn't drop it.
     inputs: InputFiles,
+    /// The inputs as they run (clips, cameras), indexed by [`Role::index`].
+    feeds: [Input; 2],
+    /// The memory clips and camera buffers share.
+    budget: Budget,
     /// The named project file the session belongs to; none while Untitled.
     project_file: Option<PathBuf>,
     /// The session as last saved or opened; none when it matches no file.
@@ -277,6 +283,8 @@ impl State {
             session_lock,
             autosave_off: false,
             inputs: InputFiles::default(),
+            feeds: Role::ALL.map(Input::new),
+            budget: Budget::new(MEMORY_LIMIT),
             project_file: None,
             saved: None,
             autosaved: None,
@@ -338,8 +346,9 @@ impl State {
     }
 
     /// Makes `project` the running session, at rest: its motion, canvas size, frame rate
-    /// and images. A missing image is reported and the test card (or no background) is
-    /// shown instead, but its path stays in the session.
+    /// and inputs. A missing file is reported and the test card (or no background) is
+    /// shown instead, but its path stays in the session. Clips show once loaded, and
+    /// cameras once they send a picture.
     fn apply_project(&mut self, project: &Project) {
         self.motion = project.motion();
         if self.recorder.is_none() {
@@ -353,23 +362,8 @@ impl State {
             self.ui.rate = project.frame_rate;
         }
         let mut problems = Vec::new();
-        match &project.inputs.source {
-            Some(path) => {
-                if let Err(err) = self.open_source(path) {
-                    problems.push(image_problem("Source", path, &err));
-                    self.show_test_card();
-                }
-            }
-            None => self.show_test_card(),
-        }
-        match &project.inputs.background {
-            Some(path) => {
-                if let Err(err) = self.open_background(path) {
-                    problems.push(image_problem("Background", path, &err));
-                    self.set_background(None);
-                }
-            }
-            None => self.set_background(None),
+        for role in Role::ALL {
+            self.apply_input(role, &project.inputs.get(role), &mut problems);
         }
         self.inputs = project.inputs.clone();
         self.ui.load_error = (!problems.is_empty()).then(|| problems.join("\n"));
@@ -694,11 +688,26 @@ impl State {
         self.ui.files.presets = presets::list(&self.ui.presets_folder);
     }
 
-    /// Loads a dropped (or command-line) image as the source.
+    /// Loads a dropped (or command-line) image or video as the source.
     fn load_source(&mut self, path: &Path) {
-        match self.open_source(path) {
+        self.open_file(Role::Source, path);
+    }
+
+    /// Opens `path` as `role`'s input: an image at once, or a clip once it has loaded
+    /// (see [`State::poll_inputs`]); until then the input shows what it did. The project
+    /// remembers the file once it shows.
+    fn open_file(&mut self, role: Role, path: &Path) {
+        if !is_image(path) {
+            self.feeds[role.index()].load(path, self.renderer.size(), &self.budget);
+            return;
+        }
+        let opened = match role {
+            Role::Source => self.open_source(path),
+            Role::Background => self.open_background(path),
+        };
+        match opened {
             Ok(()) => {
-                self.inputs.source = Some(absolute(path));
+                self.remember_file(role, Some(absolute(path)));
                 self.ui.load_error = None;
             }
             Err(err) => {
@@ -710,12 +719,45 @@ impl State {
         self.clock.reanchor(self.seconds());
     }
 
+    /// Records that `role`'s input is the file at `path` (or nothing), not a camera.
+    fn remember_file(&mut self, role: Role, path: Option<PathBuf>) {
+        let mut file = self.inputs.get(role);
+        file.path = path;
+        file.camera = None;
+        self.inputs.set(role, file);
+    }
+
+    /// Takes over clips that finished loading, and reports those that failed.
+    fn poll_inputs(&mut self) {
+        for role in Role::ALL {
+            let renderers = [&mut self.renderer, self.preview.renderer_mut()];
+            let feed = &mut self.feeds[role.index()];
+            match feed.poll(&self.device, &self.queue, renderers) {
+                Some(Ok(path)) => {
+                    let info = format!("{}: {}", role.label(), feed.info);
+                    match role {
+                        Role::Source => self.ui.source_info = info,
+                        Role::Background => self.ui.background_info = Some(info),
+                    }
+                    self.remember_file(role, Some(absolute(&path)));
+                    self.ui.load_error = None;
+                }
+                Some(Err(err)) => {
+                    log::warn!("{err:#}");
+                    self.ui.load_error = Some(format!("{err:#}"));
+                }
+                None => {}
+            }
+        }
+    }
+
     /// Shows the image at `path` as the source.
     fn open_source(&mut self, path: &Path) -> Result<()> {
         let image = load_fitting(path, self.max_texture_side)?;
         self.renderer.set_source(&self.device, &self.queue, &image);
         self.preview.set_source(&self.device, &self.queue, &image);
         self.ui.source_info = describe(&path.display().to_string(), &image);
+        self.feeds[Role::Source.index()].show_still(self.ui.source_info.clone());
         Ok(())
     }
 
@@ -723,25 +765,17 @@ impl State {
         let image = test_card(&mut self.ui);
         self.renderer.set_source(&self.device, &self.queue, &image);
         self.preview.set_source(&self.device, &self.queue, &image);
+        self.feeds[Role::Source.index()].show_still(self.ui.source_info.clone());
     }
 
-    /// Asks for a background image for keyed levels and shows it.
+    /// Asks for a background image or video for keyed levels and shows it.
     fn choose_background(&mut self) {
         let picked = rfd::FileDialog::new()
-            .set_title("Background image")
-            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .set_title("Background image or video")
+            .add_filter("Images and videos", MEDIA_EXTENSIONS)
             .pick_file();
         if let Some(path) = picked {
-            match self.open_background(&path) {
-                Ok(()) => {
-                    self.inputs.background = Some(absolute(&path));
-                    self.ui.load_error = None;
-                }
-                Err(err) => {
-                    log::warn!("{err:#}");
-                    self.ui.load_error = Some(format!("{err:#}"));
-                }
-            }
+            self.open_file(Role::Background, &path);
         }
         // The dialog and decoding block the app; that must not make canvas frames late.
         self.clock.reanchor(self.seconds());
@@ -767,6 +801,70 @@ impl State {
             .set_background(&self.device, &self.queue, image);
         if image.is_none() {
             self.ui.background_info = None;
+        }
+        self.feeds[Role::Background.index()].show_still(String::new());
+    }
+
+    /// Loads `role`'s slit-scan map image, or clears it.
+    fn open_map(&mut self, role: Role, path: Option<&Path>) -> Result<()> {
+        let map = path
+            .map(|path| load_fitting(path, self.max_texture_side))
+            .transpose();
+        let renderers = [&mut self.renderer, self.preview.renderer_mut()];
+        let feed = &mut self.feeds[role.index()];
+        match map {
+            Ok(map) => {
+                feed.set_map(&self.device, &self.queue, renderers, map);
+                Ok(())
+            }
+            Err(err) => {
+                feed.set_map(&self.device, &self.queue, renderers, None);
+                Err(err)
+            }
+        }
+    }
+
+    /// Makes `role` show what `file` names, as opening a project does. Problems are
+    /// added to `problems`, and the input shows nothing (the test card, or black).
+    fn apply_input(&mut self, role: Role, file: &InputFile, problems: &mut Vec<String>) {
+        let label = role.label();
+        // Until a clip or camera shows, the input shows nothing.
+        match role {
+            Role::Source => self.show_test_card(),
+            Role::Background => self.set_background(None),
+        }
+        if let Err(err) = self.open_map(role, file.slit_map.as_deref()) {
+            let path = file.slit_map.as_deref().unwrap_or(Path::new(""));
+            problems.push(file_problem(&format!("{label} slit-scan map"), path, &err));
+        }
+        if let Some(camera) = &file.camera {
+            let canvas = self.renderer.size();
+            let feed = &mut self.feeds[role.index()];
+            feed.open_camera(camera, canvas, &self.budget);
+            return;
+        }
+        let Some(path) = &file.path else {
+            return;
+        };
+        if !is_image(path) {
+            if path.exists() {
+                let canvas = self.renderer.size();
+                self.feeds[role.index()].load(path, canvas, &self.budget);
+            } else {
+                problems.push(format!("{label} video not found: {}", path.display()));
+            }
+            return;
+        }
+        let opened = match role {
+            Role::Source => self.open_source(path),
+            Role::Background => self.open_background(path),
+        };
+        if let Err(err) = opened {
+            problems.push(file_problem(&format!("{label} image"), path, &err));
+            match role {
+                Role::Source => self.show_test_card(),
+                Role::Background => self.set_background(None),
+            }
         }
     }
 
@@ -889,6 +987,18 @@ impl State {
             self.renderer.reset_motion();
         }
         let mut encoder = self.device.create_command_encoder(&Default::default());
+        for (feed, video) in self.feeds.iter_mut().zip(&self.frame_params.video) {
+            let renderer = &mut self.renderer;
+            feed.feed(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                renderer,
+                View::Main,
+                video,
+                paused,
+            );
+        }
         self.renderer.render_canvas(
             &self.device,
             &self.queue,
@@ -902,13 +1012,31 @@ impl State {
             .then(|| self.motion.preview())
             .flatten()
         {
-            Some(preview) => self.preview.render(
-                &self.device,
-                &self.queue,
-                &mut encoder,
-                &preview,
-                self.time as f32,
-            ),
+            Some(preview) => {
+                if self.preview.shows() != Some(preview.source) {
+                    for feed in &mut self.feeds {
+                        feed.sync_preview();
+                    }
+                }
+                for (feed, video) in self.feeds.iter_mut().zip(&preview.frame.video) {
+                    feed.feed(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        self.preview.renderer_mut(),
+                        View::Preview,
+                        video,
+                        paused,
+                    );
+                }
+                self.preview.render(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &preview,
+                    self.time as f32,
+                );
+            }
             None => self.preview.hide(),
         }
         let mut capture_failed = false;
@@ -989,6 +1117,7 @@ impl State {
                 size: self.preview.size(),
                 label: p.source.label(),
             });
+        self.poll_inputs();
         self.ui.late = self.clock.late();
         self.ui.files.project_name = self.project_name();
         self.ui.files.unsaved = self.unsaved(&self.project());
@@ -1031,7 +1160,7 @@ impl State {
         }
         if actions.clear_background {
             self.set_background(None);
-            self.inputs.background = None;
+            self.remember_file(Role::Background, None);
         }
         if actions.stop_recording {
             self.stop_recording();
@@ -1131,14 +1260,19 @@ fn test_card(ui: &mut UiState) -> GrayImage {
     image
 }
 
-/// What to say about a project's image that didn't load.
-fn image_problem(kind: &str, path: &Path, err: &anyhow::Error) -> String {
+/// What to say about a project's file (`what`, e.g. "Source image") that didn't load.
+fn file_problem(what: &str, path: &Path, err: &anyhow::Error) -> String {
     if path.exists() {
         format!("{err:#}")
     } else {
-        format!("{kind} image not found: {}", path.display())
+        format!("{what} not found: {}", path.display())
     }
 }
+
+/// What the open dialogs offer: the images the app reads and common video files.
+const MEDIA_EXTENSIONS: &[&str] = &[
+    "png", "jpg", "jpeg", "mp4", "mov", "mkv", "avi", "webm", "m4v",
+];
 
 /// `path` made absolute, so a saved project finds it from any working directory.
 fn absolute(path: &Path) -> PathBuf {

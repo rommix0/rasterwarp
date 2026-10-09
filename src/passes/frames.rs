@@ -157,6 +157,17 @@ impl FramesPass {
         self.held.len() as u32
     }
 
+    /// The most layers the ring may grow to.
+    pub fn max_layers(&self) -> u32 {
+        self.max_layers
+    }
+
+    /// Forgets which frames the ring holds, for when virtual indices change meaning
+    /// (a clip switching play mode).
+    pub fn forget(&mut self) {
+        self.held.fill(None);
+    }
+
     /// Uses `map` (or none) for slit-scan's Map.
     pub fn set_map(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, map: Option<&GrayImage>) {
         self.map = match map {

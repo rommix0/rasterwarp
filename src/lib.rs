@@ -10,6 +10,7 @@ pub mod curve_editor;
 pub mod files_ui;
 pub mod fringe;
 pub mod gpu;
+pub mod inputs;
 pub mod motion;
 pub mod params;
 pub mod passes;

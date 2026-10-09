@@ -109,6 +109,11 @@ impl PreviewView {
         self.renderer.clear_feedback(encoder);
     }
 
+    /// What the preview showed last, until it's hidden.
+    pub fn shows(&self) -> Option<PreviewSource> {
+        self.shown
+    }
+
     /// Forgets what was shown, so the trails are cleared when the preview appears again.
     pub fn hide(&mut self) {
         self.shown = None;
