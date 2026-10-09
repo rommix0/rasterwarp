@@ -13,6 +13,7 @@ pub mod fringe;
 pub mod gpu;
 pub mod inputs;
 pub mod inputs_ui;
+pub mod midi;
 pub mod motion;
 pub mod params;
 pub mod passes;
