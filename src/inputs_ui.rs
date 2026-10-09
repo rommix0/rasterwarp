@@ -1,0 +1,242 @@
+//! The panel's Source and Background sections: what each input is (an image, a video
+//! or a camera) and how a video or camera plays. They only report what was asked for;
+//! the app opens files and cameras.
+
+use egui::{CollapsingHeader, ComboBox, Slider, Ui};
+
+use crate::inputs::Kind;
+use crate::params::{Between, PlayMode, Role, Slit, VideoParams, ranges};
+use crate::video::camera::{BUFFER_SECONDS, DEFAULT_BUFFER_SECONDS};
+
+/// What an input's section shows, kept between frames.
+#[derive(Clone, Debug)]
+pub struct InputUi {
+    /// The kind picked in the panel; it takes over once a file or camera is chosen.
+    pub kind: Kind,
+    /// The kind actually showing.
+    pub running: Kind,
+    /// What's showing.
+    pub info: String,
+    /// While a clip loads: "Loading flip.mp4… 40%".
+    pub loading: Option<String>,
+    /// A camera's state: "Opening…", "Live" or "No Signal".
+    pub status: Option<String>,
+    /// Why a camera has no signal, or that its buffer had to be shortened.
+    pub note: Option<String>,
+    /// The camera picked in the list.
+    pub camera: String,
+    /// Seconds of frames the camera keeps.
+    pub buffer_seconds: f32,
+    /// The deepest slit-scan the GPU's frame ring holds, in seconds.
+    pub max_depth: Option<f32>,
+    /// The slit-scan map image's file name, if one is loaded.
+    pub map: Option<String>,
+}
+
+impl Default for InputUi {
+    fn default() -> Self {
+        Self {
+            kind: Kind::Image,
+            running: Kind::Image,
+            info: String::new(),
+            loading: None,
+            status: None,
+            note: None,
+            camera: String::new(),
+            buffer_seconds: DEFAULT_BUFFER_SECONDS,
+            max_depth: None,
+            map: None,
+        }
+    }
+}
+
+/// One-shot requests from the input sections this frame.
+#[derive(Default)]
+pub struct InputActions {
+    /// Ask for an image or video file.
+    pub open: Option<Role>,
+    /// Switch to the camera picked in the list.
+    pub use_camera: Option<Role>,
+    /// Show nothing: the test card, or a black background.
+    pub clear: Option<Role>,
+    pub choose_map: Option<Role>,
+    pub clear_map: Option<Role>,
+    /// List the cameras again.
+    pub list_cameras: bool,
+}
+
+/// The Source or Background section. `cameras` is the listed devices (none until
+/// listed); `video` is the edited bank's playback settings for this input.
+pub fn input_section(
+    ui: &mut Ui,
+    role: Role,
+    state: &mut InputUi,
+    cameras: Option<&[String]>,
+    video: &mut VideoParams,
+    actions: &mut InputActions,
+) {
+    CollapsingHeader::new(role.label())
+        .default_open(role == Role::Source)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for kind in Kind::ALL {
+                    ui.selectable_value(&mut state.kind, kind, kind.label());
+                }
+            });
+            match state.kind {
+                Kind::Image | Kind::Video => {
+                    ui.horizontal(|ui| {
+                        if ui.button("Open…").clicked() {
+                            actions.open = Some(role);
+                        }
+                        let nothing = match role {
+                            Role::Source => "Test card",
+                            Role::Background => "No background",
+                        };
+                        if ui.button(nothing).clicked() {
+                            actions.clear = Some(role);
+                        }
+                    });
+                }
+                Kind::Camera => camera_choice(ui, role, state, cameras, actions),
+            }
+            ui.small(&state.info);
+            for line in [&state.loading, &state.status, &state.note]
+                .into_iter()
+                .flatten()
+            {
+                ui.small(line);
+            }
+            if state.running != Kind::Image {
+                playback(ui, role, state, video, actions);
+            }
+        });
+}
+
+fn camera_choice(
+    ui: &mut Ui,
+    role: Role,
+    state: &mut InputUi,
+    cameras: Option<&[String]>,
+    actions: &mut InputActions,
+) {
+    let Some(cameras) = cameras else {
+        actions.list_cameras = true;
+        ui.small("Looking for cameras…");
+        return;
+    };
+    ui.horizontal(|ui| {
+        let shown = if state.camera.is_empty() {
+            "Choose a camera"
+        } else {
+            &state.camera
+        };
+        ComboBox::from_id_salt(("camera", role.index()))
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                for name in cameras {
+                    ui.selectable_value(&mut state.camera, name.clone(), name);
+                }
+            });
+        if ui.button("Refresh").clicked() {
+            actions.list_cameras = true;
+        }
+    });
+    if cameras.is_empty() {
+        ui.small("No cameras found.");
+    }
+    ui.add(Slider::new(&mut state.buffer_seconds, BUFFER_SECONDS).text("buffer (s)"))
+        .on_hover_text("Seconds of frames kept for delay and slit-scan");
+    let label = if state.running == Kind::Camera {
+        "Restart camera"
+    } else {
+        "Use camera"
+    };
+    if ui
+        .add_enabled(!state.camera.is_empty(), egui::Button::new(label))
+        .clicked()
+    {
+        actions.use_camera = Some(role);
+    }
+}
+
+/// How a video or camera plays: it edits the same bank or cue as the rest of the panel.
+fn playback(
+    ui: &mut Ui,
+    role: Role,
+    state: &InputUi,
+    v: &mut VideoParams,
+    actions: &mut InputActions,
+) {
+    ui.separator();
+    if state.running == Kind::Video {
+        ui.horizontal(|ui| {
+            for mode in PlayMode::ALL {
+                ui.selectable_value(&mut v.mode, mode, mode.label());
+            }
+        });
+        if v.mode == PlayMode::Scrub {
+            ui.add(Slider::new(&mut v.position, ranges::POSITION).text("position"));
+        } else {
+            ui.add(Slider::new(&mut v.speed, ranges::PLAY_SPEED).text("speed"))
+                .on_hover_text("× the clip's own frame rate; negative plays backwards");
+        }
+    } else {
+        // Shown up to the buffer length; a longer delay from a file shows the oldest
+        // frame. Only an edit changes the value, so drawing it isn't a change.
+        let buffer = state.buffer_seconds.min(*ranges::DELAY.end());
+        let mut delay = v.delay.min(buffer);
+        if ui
+            .add(Slider::new(&mut delay, 0.0..=buffer).text("delay (s)"))
+            .changed()
+        {
+            v.delay = delay;
+        }
+    }
+    ui.horizontal(|ui| {
+        ui.label("Between frames");
+        for between in Between::ALL {
+            ui.selectable_value(&mut v.between, between, between.label());
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Slit-scan");
+        for slit in Slit::ALL {
+            ui.selectable_value(&mut v.slit, slit, slit.label());
+        }
+    });
+    if v.slit == Slit::Off {
+        return;
+    }
+    let deepest = state
+        .max_depth
+        .unwrap_or(*ranges::SLIT_DEPTH.end())
+        .min(*ranges::SLIT_DEPTH.end());
+    // Shown up to the deepest the ring allows; a deeper value from a file is used at
+    // that depth. Only an edit changes the value.
+    let mut depth = v.slit_depth.min(deepest);
+    if ui
+        .add(Slider::new(&mut depth, 0.0..=deepest).text("depth (s)"))
+        .on_hover_text(format!("Up to {deepest:.1} s fits in the GPU's frame ring"))
+        .changed()
+    {
+        v.slit_depth = depth;
+    }
+    ui.checkbox(&mut v.slit_flip, "Flip");
+    if v.slit == Slit::Map {
+        ui.horizontal(|ui| {
+            if ui.button("Map image…").clicked() {
+                actions.choose_map = Some(role);
+            }
+            if state.map.is_some() && ui.button("Clear").clicked() {
+                actions.clear_map = Some(role);
+            }
+        });
+        ui.small(
+            state
+                .map
+                .as_deref()
+                .unwrap_or("No map image: Map works as Rows."),
+        );
+    }
+}

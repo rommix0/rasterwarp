@@ -24,6 +24,7 @@ use crate::clock::{CanvasClock, Pacing};
 use crate::files_ui::FileActions;
 use crate::gpu;
 use crate::inputs::{Input, View, is_image};
+use crate::inputs_ui::InputActions;
 use crate::motion::{Mode, Motion};
 use crate::params::{Params, Role};
 use crate::passes::Renderer;
@@ -31,9 +32,10 @@ use crate::passes::composite::Area;
 use crate::presets;
 use crate::preview::PreviewView;
 use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
-use crate::session::{self, Autosave, InputFile, InputFiles, Project};
+use crate::session::{self, Autosave, CameraChoice, InputFile, InputFiles, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
+use crate::video::camera::{self, Status};
 use crate::video::{Budget, MEMORY_LIMIT};
 
 /// How often the session is autosaved (when it changed).
@@ -238,7 +240,7 @@ impl State {
             ..Default::default()
         };
         ui.capture.settings = settings.capture.clone();
-        let image = test_card(&mut ui);
+        let image = test_card();
         let renderer = Renderer::new(&device, &queue, composite_format, canvas::DEFAULT, &image);
 
         let egui_ctx = egui::Context::default();
@@ -292,6 +294,8 @@ impl State {
             last_autosave: epoch,
             settings_written: settings,
         };
+        state.feeds[Role::Source.index()].show_still(describe(TEST_CARD, &image));
+        state.feeds[Role::Background.index()].show_still(NO_BACKGROUND.into());
         state.start_session(initial_image);
         Ok(state)
     }
@@ -735,11 +739,6 @@ impl State {
             let feed = &mut self.feeds[role.index()];
             match feed.poll(&self.device, &self.queue, renderers) {
                 Some(Ok(path)) => {
-                    let info = format!("{}: {}", role.label(), feed.info);
-                    match role {
-                        Role::Source => self.ui.source_info = info,
-                        Role::Background => self.ui.background_info = Some(info),
-                    }
                     self.remember_file(role, Some(absolute(&path)));
                 }
                 Some(Err(err)) => {
@@ -755,58 +754,165 @@ impl State {
         }
     }
 
+    /// Shows each input's state in its panel section.
+    fn show_inputs(&mut self) {
+        for role in Role::ALL {
+            let feed = &self.feeds[role.index()];
+            let state = &mut self.ui.inputs[role.index()];
+            let running = feed.kind();
+            if state.running != running {
+                // A file or camera took over: the panel follows.
+                state.running = running;
+                state.kind = running;
+            }
+            state.info = feed.info.clone();
+            state.loading = feed
+                .loading()
+                .map(|(path, done)| format!("Loading {}… {:.0}%", file_name(path), done * 100.0));
+            let status = feed.camera_status();
+            state.status = status.as_ref().map(|status| {
+                match status {
+                    Status::Opening => "Opening the camera…",
+                    Status::Live => "Live",
+                    Status::NoSignal(_) => "No Signal",
+                }
+                .to_string()
+            });
+            state.note = match status {
+                Some(Status::NoSignal(why)) => Some(why),
+                _ => feed.camera_note(),
+            };
+            state.max_depth = feed.max_depth(&mut self.renderer);
+            state.map = self.inputs.get(role).slit_map.as_deref().map(file_name);
+        }
+    }
+
+    /// Carries out what the Source and Background sections asked for.
+    fn input_actions(&mut self, actions: InputActions) {
+        if actions.list_cameras {
+            self.list_cameras();
+        }
+        if let Some(role) = actions.open {
+            self.choose_file(role);
+        }
+        if let Some(role) = actions.use_camera {
+            self.use_camera(role);
+        }
+        if let Some(role) = actions.clear {
+            match role {
+                Role::Source => self.show_test_card(),
+                Role::Background => self.set_background(None),
+            }
+            self.remember_file(role, None);
+        }
+        if let Some(role) = actions.choose_map {
+            self.choose_map(role);
+        }
+        if let Some(role) = actions.clear_map {
+            let _ = self.open_map(role, None);
+            let mut file = self.inputs.get(role);
+            file.slit_map = None;
+            self.inputs.set(role, file);
+        }
+    }
+
+    fn list_cameras(&mut self) {
+        let listed = camera::list();
+        // Listing can take a moment; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+        self.ui.cameras = Some(listed.unwrap_or_else(|err| {
+            log::warn!("{err:#}");
+            self.ui.load_error = Some(format!("{err:#}"));
+            Vec::new()
+        }));
+    }
+
+    /// Asks for an image or video file for `role` and opens it.
+    fn choose_file(&mut self, role: Role) {
+        let picked = rfd::FileDialog::new()
+            .set_title(format!("{} image or video", role.label()))
+            .add_filter("Images and videos", MEDIA_EXTENSIONS)
+            .pick_file();
+        if let Some(path) = picked {
+            self.open_file(role, &path);
+        }
+        // The dialog blocks the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
+    /// Switches `role` to the camera picked in its section.
+    fn use_camera(&mut self, role: Role) {
+        let state = &self.ui.inputs[role.index()];
+        let choice = CameraChoice {
+            name: state.camera.clone(),
+            buffer_seconds: state.buffer_seconds,
+        };
+        let canvas = self.renderer.size();
+        self.feeds[role.index()].open_camera(&choice, canvas, &self.budget);
+        let mut file = self.inputs.get(role);
+        file.camera = Some(choice);
+        self.inputs.set(role, file);
+        self.ui.load_error = None;
+    }
+
+    /// Asks for a slit-scan map image for `role` and loads it.
+    fn choose_map(&mut self, role: Role) {
+        let picked = rfd::FileDialog::new()
+            .set_title("Slit-scan map image")
+            .add_filter("Images", &["png", "jpg", "jpeg"])
+            .pick_file();
+        if let Some(path) = picked {
+            match self.open_map(role, Some(&path)) {
+                Ok(()) => {
+                    let mut file = self.inputs.get(role);
+                    file.slit_map = Some(absolute(&path));
+                    self.inputs.set(role, file);
+                    self.ui.load_error = None;
+                }
+                Err(err) => {
+                    log::warn!("{err:#}");
+                    self.ui.load_error = Some(format!("{err:#}"));
+                }
+            }
+        }
+        // The dialog and decoding block the app; that must not make canvas frames late.
+        self.clock.reanchor(self.seconds());
+    }
+
     /// Shows the image at `path` as the source.
     fn open_source(&mut self, path: &Path) -> Result<()> {
         let image = load_fitting(path, self.max_texture_side)?;
         self.renderer.set_source(&self.device, &self.queue, &image);
         self.preview.set_source(&self.device, &self.queue, &image);
-        self.ui.source_info = describe(&path.display().to_string(), &image);
-        self.feeds[Role::Source.index()].show_still(self.ui.source_info.clone());
+        self.feeds[Role::Source.index()].show_still(describe(&file_name(path), &image));
         Ok(())
     }
 
     fn show_test_card(&mut self) {
-        let image = test_card(&mut self.ui);
+        let image = test_card();
         self.renderer.set_source(&self.device, &self.queue, &image);
         self.preview.set_source(&self.device, &self.queue, &image);
-        self.feeds[Role::Source.index()].show_still(self.ui.source_info.clone());
-    }
-
-    /// Asks for a background image or video for keyed levels and shows it.
-    fn choose_background(&mut self) {
-        let picked = rfd::FileDialog::new()
-            .set_title("Background image or video")
-            .add_filter("Images and videos", MEDIA_EXTENSIONS)
-            .pick_file();
-        if let Some(path) = picked {
-            self.open_file(Role::Background, &path);
-        }
-        // The dialog and decoding block the app; that must not make canvas frames late.
-        self.clock.reanchor(self.seconds());
+        self.feeds[Role::Source.index()].show_still(describe(TEST_CARD, &image));
     }
 
     /// Shows the image at `path` behind see-through levels.
     fn open_background(&mut self, path: &Path) -> Result<()> {
         let image = load_background(path, self.max_texture_side)?;
         self.set_background(Some(&image));
-        self.ui.background_info = Some(format!(
-            "Background: {} ({}×{})",
-            path.display(),
-            image.width,
-            image.height
-        ));
+        let info = format!("{} ({}×{})", file_name(path), image.width, image.height);
+        self.feeds[Role::Background.index()].show_still(info);
         Ok(())
     }
 
+    /// Shows `image` behind see-through levels, or black.
     fn set_background(&mut self, image: Option<&ColorImage>) {
         self.renderer
             .set_background(&self.device, &self.queue, image);
         self.preview
             .set_background(&self.device, &self.queue, image);
         if image.is_none() {
-            self.ui.background_info = None;
+            self.feeds[Role::Background.index()].show_still(NO_BACKGROUND.into());
         }
-        self.feeds[Role::Background.index()].show_still(String::new());
     }
 
     /// Loads `role`'s slit-scan map image, or clears it.
@@ -843,8 +949,10 @@ impl State {
         }
         if let Some(camera) = &file.camera {
             let canvas = self.renderer.size();
-            let feed = &mut self.feeds[role.index()];
-            feed.open_camera(camera, canvas, &self.budget);
+            self.feeds[role.index()].open_camera(camera, canvas, &self.budget);
+            let state = &mut self.ui.inputs[role.index()];
+            state.camera = camera.name.clone();
+            state.buffer_seconds = camera.buffer_seconds;
             return;
         }
         let Some(path) = &file.path else {
@@ -1122,6 +1230,7 @@ impl State {
                 label: p.source.label(),
             });
         self.poll_inputs();
+        self.show_inputs();
         self.ui.late = self.clock.late();
         self.ui.files.project_name = self.project_name();
         self.ui.files.unsaved = self.unsaved(&self.project());
@@ -1159,13 +1268,7 @@ impl State {
         if actions.choose_folder {
             self.choose_capture_folder();
         }
-        if actions.choose_background {
-            self.choose_background();
-        }
-        if actions.clear_background {
-            self.set_background(None);
-            self.remember_file(Role::Background, None);
-        }
+        self.input_actions(actions.inputs);
         if actions.stop_recording {
             self.stop_recording();
         }
@@ -1258,11 +1361,13 @@ impl State {
     }
 }
 
-fn test_card(ui: &mut UiState) -> GrayImage {
-    let image = source::test_card(1600, 900);
-    ui.source_info = describe("built-in test card", &image);
-    image
+/// What the source shows without a file or camera.
+fn test_card() -> GrayImage {
+    source::test_card(1600, 900)
 }
+
+const TEST_CARD: &str = "Built-in test card";
+const NO_BACKGROUND: &str = "No background: see-through levels show black.";
 
 /// What to say about a project's file (`what`, e.g. "Source image") that didn't load.
 fn file_problem(what: &str, path: &Path, err: &anyhow::Error) -> String {
@@ -1284,7 +1389,14 @@ fn absolute(path: &Path) -> PathBuf {
 }
 
 fn describe(name: &str, image: &GrayImage) -> String {
-    format!("Source: {name} ({}×{})", image.width, image.height)
+    format!("{name} ({}×{})", image.width, image.height)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Loads a background image and checks it fits in a GPU texture.

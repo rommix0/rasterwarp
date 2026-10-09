@@ -11,6 +11,7 @@ pub mod files_ui;
 pub mod fringe;
 pub mod gpu;
 pub mod inputs;
+pub mod inputs_ui;
 pub mod motion;
 pub mod params;
 pub mod passes;

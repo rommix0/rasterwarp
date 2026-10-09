@@ -11,9 +11,10 @@ use crate::capture::recorder::{RecordSettings, RecordStatus};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::files_ui::{self, FileActions, FilesUi};
+use crate::inputs_ui::{self, InputActions, InputUi};
 use crate::motion::{Mode, Motion};
 use crate::params::{
-    Axis, Envelope, OscInput, OscSync, Oscillator, Params, Waveform, even_thresholds, ranges,
+    Axis, Envelope, OscInput, OscSync, Oscillator, Params, Role, Waveform, even_thresholds, ranges,
 };
 use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
@@ -33,7 +34,6 @@ pub struct UiState {
     pub rate: FrameRate,
     /// Canvas frames skipped so far because the app fell behind.
     pub late: u64,
-    pub source_info: String,
     pub load_error: Option<String>,
     /// A project, preset or autosave problem.
     pub file_error: Option<String>,
@@ -42,8 +42,10 @@ pub struct UiState {
     /// Why this window doesn't autosave. It stays up; file messages come and go.
     pub session_note: Option<String>,
     pub presets_folder: PathBuf,
-    /// The keying background's description, if one is loaded.
-    pub background_info: Option<String>,
+    /// The Source and Background sections, indexed by [`Role::index`].
+    pub inputs: [InputUi; 2],
+    /// The cameras DirectShow listed; none until they're first needed.
+    pub cameras: Option<Vec<String>>,
     /// The user curve open in the curve editor.
     pub editing_curve: Option<u32>,
     pub canvas: CanvasChoice,
@@ -83,9 +85,8 @@ pub struct UiActions {
     pub save_still: bool,
     pub stop_recording: bool,
     pub choose_folder: bool,
-    pub choose_background: bool,
-    pub clear_background: bool,
     pub files: FileActions,
+    pub inputs: InputActions,
     /// The part of the window left for the canvas, in points (beside the panel).
     pub canvas_rect: Option<egui::Rect>,
 }
@@ -127,7 +128,6 @@ pub fn draw(
                     1000.0 / state.frame_ms.max(0.001),
                     state.late
                 ));
-                ui.label(&state.source_info);
                 if let Some(err) = &state.load_error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
                 }
@@ -140,7 +140,7 @@ pub fn draw(
                 if let Some(note) = &state.session_note {
                     ui.label(note);
                 }
-                ui.label("Drop an image, preset or project onto the window.");
+                ui.label("Drop an image, video, preset or project onto the window.");
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut state.paused, "Pause");
                     ui.checkbox(&mut state.show_preview, "Show preview");
@@ -162,6 +162,16 @@ pub fn draw(
                 rate_section(ui, &mut state.rate, recording);
                 canvas_section(ui, &mut state.canvas, recording, &mut actions);
                 mode_section(ui, motion);
+                for role in Role::ALL {
+                    inputs_ui::input_section(
+                        ui,
+                        role,
+                        &mut state.inputs[role.index()],
+                        state.cameras.as_deref(),
+                        motion.editable().video_mut(role),
+                        &mut actions.inputs,
+                    );
+                }
                 files_ui::presets_section(
                     ui,
                     &mut state.files,
@@ -173,7 +183,7 @@ pub fn draw(
                 warp_section(ui, params);
                 raster_section(ui, params);
                 colorize_section(ui, params);
-                key_section(ui, params, state, &mut actions);
+                key_section(ui, params);
                 feedback_section(ui, params, &mut actions);
                 glow_section(ui, params);
             });
@@ -679,7 +689,7 @@ fn colorize_section(ui: &mut Ui, params: &mut Params) {
         });
 }
 
-fn key_section(ui: &mut Ui, params: &mut Params, state: &UiState, actions: &mut UiActions) {
+fn key_section(ui: &mut Ui, params: &mut Params) {
     let levels = params.colorize.levels;
     let k = &mut params.key;
     CollapsingHeader::new("Keying").show(ui, |ui| {
@@ -696,20 +706,7 @@ fn key_section(ui: &mut Ui, params: &mut Params, state: &UiState, actions: &mut 
                 }
             });
         });
-        ui.horizontal(|ui| {
-            if ui.button("Background image…").clicked() {
-                actions.choose_background = true;
-            }
-            if state.background_info.is_some() && ui.button("No background").clicked() {
-                actions.clear_background = true;
-            }
-        });
-        ui.small(
-            state
-                .background_info
-                .as_deref()
-                .unwrap_or("No background: see-through levels show black."),
-        );
+        ui.small("See-through levels show the Background input.");
     });
 }
 
