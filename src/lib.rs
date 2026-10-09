@@ -1,6 +1,7 @@
 //! Rasterwarp: real-time analog video-synthesis animation.
 
 pub mod app;
+pub mod audio;
 pub mod blend;
 pub mod canvas;
 pub mod capture;
