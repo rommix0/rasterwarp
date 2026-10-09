@@ -30,7 +30,7 @@ use crate::passes::composite::Area;
 use crate::presets;
 use crate::preview::PreviewView;
 use crate::save::{self, PRESET_EXTENSION, PROJECT_EXTENSION, Settings};
-use crate::session::{self, Autosave, Project};
+use crate::session::{self, Autosave, InputFiles, Project};
 use crate::source::{self, ColorImage, GrayImage};
 use crate::ui::{self, UiActions, UiState};
 
@@ -146,10 +146,9 @@ struct State {
     session_lock: Option<File>,
     /// No autosave this run: another window owns it, or an unreadable one is in the way.
     autosave_off: bool,
-    /// The source and background image files, as a project saves them. A project's
-    /// missing image keeps its path here, so saving doesn't drop it.
-    source_path: Option<PathBuf>,
-    background_path: Option<PathBuf>,
+    /// The inputs' files and cameras, as a project saves them. A project's missing image
+    /// keeps its path here, so saving doesn't drop it.
+    inputs: InputFiles,
     /// The named project file the session belongs to; none while Untitled.
     project_file: Option<PathBuf>,
     /// The session as last saved or opened; none when it matches no file.
@@ -277,8 +276,7 @@ impl State {
             data_dir,
             session_lock,
             autosave_off: false,
-            source_path: None,
-            background_path: None,
+            inputs: InputFiles::default(),
             project_file: None,
             saved: None,
             autosaved: None,
@@ -355,7 +353,7 @@ impl State {
             self.ui.rate = project.frame_rate;
         }
         let mut problems = Vec::new();
-        match &project.source {
+        match &project.inputs.source {
             Some(path) => {
                 if let Err(err) = self.open_source(path) {
                     problems.push(image_problem("Source", path, &err));
@@ -364,7 +362,7 @@ impl State {
             }
             None => self.show_test_card(),
         }
-        match &project.background {
+        match &project.inputs.background {
             Some(path) => {
                 if let Err(err) = self.open_background(path) {
                     problems.push(image_problem("Background", path, &err));
@@ -373,8 +371,7 @@ impl State {
             }
             None => self.set_background(None),
         }
-        self.source_path = project.source.clone();
-        self.background_path = project.background.clone();
+        self.inputs = project.inputs.clone();
         self.ui.load_error = (!problems.is_empty()).then(|| problems.join("\n"));
         self.clear_feedback();
         // Loading images stalls; that must not make canvas frames late.
@@ -387,8 +384,7 @@ impl State {
             &self.motion,
             self.ui.canvas.current,
             self.ui.rate,
-            self.source_path.as_deref(),
-            self.background_path.as_deref(),
+            &self.inputs,
         )
     }
 
@@ -702,7 +698,7 @@ impl State {
     fn load_source(&mut self, path: &Path) {
         match self.open_source(path) {
             Ok(()) => {
-                self.source_path = Some(absolute(path));
+                self.inputs.source = Some(absolute(path));
                 self.ui.load_error = None;
             }
             Err(err) => {
@@ -738,7 +734,7 @@ impl State {
         if let Some(path) = picked {
             match self.open_background(&path) {
                 Ok(()) => {
-                    self.background_path = Some(absolute(&path));
+                    self.inputs.background = Some(absolute(&path));
                     self.ui.load_error = None;
                 }
                 Err(err) => {
@@ -1035,7 +1031,7 @@ impl State {
         }
         if actions.clear_background {
             self.set_background(None);
-            self.background_path = None;
+            self.inputs.background = None;
         }
         if actions.stop_recording {
             self.stop_recording();

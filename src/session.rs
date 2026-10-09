@@ -1,6 +1,7 @@
 //! A project: the whole session in one file. It holds the mode, both transition banks,
-//! the sequence, user curves, canvas size, frame rate and image paths, but nothing in
-//! motion (ramp progress, the sequence's position, phases, trails).
+//! the sequence, user curves, canvas size, frame rate and inputs (files and cameras),
+//! but nothing in motion (ramp progress, the sequence's position, phases, video clocks,
+//! trails, camera buffers).
 
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -12,11 +13,12 @@ use serde::{Deserialize, Serialize};
 use crate::canvas;
 use crate::curve::{CurveLibrary, CurveRef, CustomCurve};
 use crate::motion::{Mode, Motion};
-use crate::params::Params;
+use crate::params::{Params, Role};
 use crate::rate::FrameRate;
 use crate::save::{self, Loaded, PROJECT_FORMAT};
 use crate::sequence::{Cue, Sequence};
 use crate::transition::{AbState, DURATION};
+use crate::video::camera::{BUFFER_SECONDS, DEFAULT_BUFFER_SECONDS};
 
 /// Everything a project file holds. Two snapshots are equal exactly when saving would
 /// write the same file, which is how unsaved changes are found.
@@ -30,10 +32,101 @@ pub struct Project {
     /// Canvas width and height.
     pub canvas: (u32, u32),
     pub frame_rate: FrameRate,
-    /// The source image, or none for the built-in test card.
+    #[serde(flatten)]
+    pub inputs: InputFiles,
+}
+
+/// A camera input as a project saves it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CameraChoice {
+    /// The device's name, as DirectShow lists it.
+    pub name: String,
+    /// Seconds of frames kept for delay and slit-scan.
+    pub buffer_seconds: f32,
+}
+
+impl Default for CameraChoice {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            buffer_seconds: DEFAULT_BUFFER_SECONDS,
+        }
+    }
+}
+
+/// One input as a project saves it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct InputFile {
+    /// An image or video file, or none (the test card, or a black background).
+    pub path: Option<PathBuf>,
+    /// When set, the input is this camera and `path` is ignored.
+    pub camera: Option<CameraChoice>,
+    /// The slit-scan map image.
+    pub slit_map: Option<PathBuf>,
+}
+
+/// Both inputs' files and cameras. In the file they are top-level fields; `source` and
+/// `background` are the fields older projects already have.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InputFiles {
     pub source: Option<PathBuf>,
-    /// The keying background image, if any.
     pub background: Option<PathBuf>,
+    pub source_camera: Option<CameraChoice>,
+    pub background_camera: Option<CameraChoice>,
+    pub source_slit_map: Option<PathBuf>,
+    pub background_slit_map: Option<PathBuf>,
+}
+
+impl InputFiles {
+    pub fn get(&self, role: Role) -> InputFile {
+        let (path, camera, slit_map) = match role {
+            Role::Source => (&self.source, &self.source_camera, &self.source_slit_map),
+            Role::Background => (
+                &self.background,
+                &self.background_camera,
+                &self.background_slit_map,
+            ),
+        };
+        InputFile {
+            path: path.clone(),
+            camera: camera.clone(),
+            slit_map: slit_map.clone(),
+        }
+    }
+
+    pub fn set(&mut self, role: Role, input: InputFile) {
+        let (path, camera, slit_map) = match role {
+            Role::Source => (
+                &mut self.source,
+                &mut self.source_camera,
+                &mut self.source_slit_map,
+            ),
+            Role::Background => (
+                &mut self.background,
+                &mut self.background_camera,
+                &mut self.background_slit_map,
+            ),
+        };
+        *path = input.path;
+        *camera = input.camera;
+        *slit_map = input.slit_map;
+    }
+
+    /// A copy with each camera's buffer length inside its range.
+    fn checked(&self) -> Self {
+        let mut inputs = self.clone();
+        for camera in [&mut inputs.source_camera, &mut inputs.background_camera]
+            .into_iter()
+            .flatten()
+        {
+            camera.buffer_seconds = camera
+                .buffer_seconds
+                .clamp(*BUFFER_SECONDS.start(), *BUFFER_SECONDS.end());
+        }
+        inputs
+    }
 }
 
 /// The A/B banks without a running ramp.
@@ -64,8 +157,7 @@ impl Default for Project {
             curves: Vec::new(),
             canvas: canvas::DEFAULT,
             frame_rate: FrameRate::default(),
-            source: None,
-            background: None,
+            inputs: InputFiles::default(),
         }
     }
 }
@@ -99,8 +191,7 @@ impl Project {
         motion: &Motion,
         canvas: (u32, u32),
         frame_rate: FrameRate,
-        source: Option<&Path>,
-        background: Option<&Path>,
+        inputs: &InputFiles,
     ) -> Self {
         let ab = &motion.ab;
         Self {
@@ -119,13 +210,12 @@ impl Project {
             curves: motion.curves.custom.clone(),
             canvas,
             frame_rate,
-            source: source.map(Path::to_path_buf),
-            background: background.map(Path::to_path_buf),
+            inputs: inputs.clone(),
         }
     }
 
-    /// The motion this project describes, at rest. The canvas, frame rate and images are
-    /// the app's to apply.
+    /// The motion this project describes, at rest. The canvas, frame rate and inputs
+    /// are the app's to apply.
     pub fn motion(&self) -> Motion {
         let curves = CurveLibrary::from_curves(&self.curves);
         let t = &self.transition;
@@ -164,8 +254,7 @@ impl Project {
             &self.motion(),
             canvas::sanitize(self.canvas, u32::MAX),
             rate,
-            self.source.as_deref(),
-            self.background.as_deref(),
+            &self.inputs.checked(),
         )
     }
 }
@@ -304,13 +393,11 @@ mod tests {
     }
 
     fn project() -> Project {
-        Project::capture(
-            &session(),
-            (1280, 720),
-            FrameRate::ntsc(24),
-            Some(Path::new(r"C:\images\card.png")),
-            None,
-        )
+        let inputs = InputFiles {
+            source: Some(PathBuf::from(r"C:\images\card.png")),
+            ..InputFiles::default()
+        };
+        Project::capture(&session(), (1280, 720), FrameRate::ntsc(24), &inputs)
     }
 
     fn project_with(edit: impl FnOnce(&mut Value)) -> Project {
@@ -321,10 +408,8 @@ mod tests {
 
     #[test]
     fn projects_round_trip() {
-        let p = Project {
-            background: Some(PathBuf::from(r"C:\images\key.png")),
-            ..project()
-        };
+        let mut p = project();
+        p.inputs.background = Some(PathBuf::from(r"C:\images\key.png"));
         assert_eq!(p.mode, Mode::Transition);
         assert_eq!(p.sequence.as_ref().unwrap().cues.len(), 2);
         let loaded = read_project(&project_json(&p).unwrap()).unwrap();
@@ -338,10 +423,15 @@ mod tests {
         m.trigger();
         m.set_mode(Mode::Sequence);
         m.sequence_mut().run();
-        let p = Project::capture(&m, (1280, 720), FrameRate::ntsc(24), None, None);
+        let p = Project::capture(&m, (1280, 720), FrameRate::ntsc(24), &InputFiles::default());
         let mut restored = p.motion();
         assert_eq!(
-            Project::capture(&restored, (1280, 720), FrameRate::ntsc(24), None, None),
+            Project::capture(
+                &restored,
+                (1280, 720),
+                FrameRate::ntsc(24),
+                &InputFiles::default()
+            ),
             p
         );
         assert!(restored.ab.ramp().is_none());
@@ -427,18 +517,38 @@ mod tests {
     #[test]
     fn editing_the_session_changes_the_snapshot() {
         let mut m = session();
-        let before = Project::capture(&m, (1280, 720), FrameRate::default(), None, None);
+        let before = Project::capture(
+            &m,
+            (1280, 720),
+            FrameRate::default(),
+            &InputFiles::default(),
+        );
         assert_eq!(
-            Project::capture(&m, (1280, 720), FrameRate::default(), None, None),
+            Project::capture(
+                &m,
+                (1280, 720),
+                FrameRate::default(),
+                &InputFiles::default()
+            ),
             before,
             "nothing changed"
         );
         m.editable().warp.rotation = 0.5;
-        let after = Project::capture(&m, (1280, 720), FrameRate::default(), None, None);
+        let after = Project::capture(
+            &m,
+            (1280, 720),
+            FrameRate::default(),
+            &InputFiles::default(),
+        );
         assert_ne!(after, before);
         m.trigger();
         m.advance(1000);
-        let running = Project::capture(&m, (1280, 720), FrameRate::default(), None, None);
+        let running = Project::capture(
+            &m,
+            (1280, 720),
+            FrameRate::default(),
+            &InputFiles::default(),
+        );
         assert_eq!(running, after, "a running ramp isn't an edit");
     }
 
@@ -530,7 +640,52 @@ mod tests {
         assert_eq!(p.curves[0].points(), &[[0.25, 0.9], [0.5, 0.5]]);
         assert_eq!(p.canvas, (1280, 720));
         assert_eq!(p.frame_rate, FrameRate::ntsc(24));
-        assert_eq!(p.source.as_deref(), Some(Path::new(r"C:\images\card.png")));
-        assert_eq!(p.background, None);
+        let card = Some(PathBuf::from(r"C:\images\card.png"));
+        assert_eq!(
+            p.inputs,
+            InputFiles {
+                source: card,
+                ..InputFiles::default()
+            },
+            "no cameras or slit-scan maps"
+        );
+    }
+
+    #[test]
+    fn cameras_and_slit_scan_maps_round_trip() {
+        let mut p = project();
+        p.inputs.set(
+            Role::Background,
+            InputFile {
+                path: Some(PathBuf::from(r"C:\clips\loop.mp4")),
+                camera: Some(CameraChoice {
+                    name: "Logi C270 HD WebCam".into(),
+                    buffer_seconds: 4.0,
+                }),
+                slit_map: Some(PathBuf::from(r"C:\images\map.png")),
+            },
+        );
+        let json: Value = serde_json::from_str(&project_json(&p).unwrap()).unwrap();
+        assert_eq!(json["background"], json!(r"C:\clips\loop.mp4"));
+        assert_eq!(
+            json["background_camera"]["name"],
+            json!("Logi C270 HD WebCam")
+        );
+        assert_eq!(json["background_slit_map"], json!(r"C:\images\map.png"));
+        let loaded = read_project(&project_json(&p).unwrap()).unwrap().value;
+        assert_eq!(loaded, p);
+        let background = loaded.inputs.get(Role::Background);
+        assert_eq!(background.camera.unwrap().buffer_seconds, 4.0);
+        assert_eq!(loaded.inputs.get(Role::Source).camera, None);
+    }
+
+    #[test]
+    fn camera_buffers_are_kept_in_range() {
+        let p =
+            project_with(|j| j["source_camera"] = json!({"name": "Cam", "buffer_seconds": 99.0}));
+        let camera = p.inputs.source_camera.unwrap();
+        assert_eq!((camera.name.as_str(), camera.buffer_seconds), ("Cam", 30.0));
+        let p = project_with(|j| j["source_camera"] = json!({"name": "Cam"}));
+        assert_eq!(p.inputs.source_camera.unwrap().buffer_seconds, 10.0);
     }
 }
