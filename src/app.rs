@@ -698,6 +698,7 @@ impl State {
     /// remembers the file once it shows.
     fn open_file(&mut self, role: Role, path: &Path) {
         if !is_image(path) {
+            self.ui.load_error = None;
             self.feeds[role.index()].load(path, self.renderer.size(), &self.budget);
             return;
         }
@@ -740,11 +741,14 @@ impl State {
                         Role::Background => self.ui.background_info = Some(info),
                     }
                     self.remember_file(role, Some(absolute(&path)));
-                    self.ui.load_error = None;
                 }
                 Some(Err(err)) => {
                     log::warn!("{err:#}");
-                    self.ui.load_error = Some(format!("{err:#}"));
+                    let message = format!("{err:#}");
+                    self.ui.load_error = Some(match self.ui.load_error.take() {
+                        Some(shown) => format!("{shown}\n{message}"),
+                        None => message,
+                    });
                 }
                 None => {}
             }
