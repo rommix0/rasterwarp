@@ -22,3 +22,4 @@ pub mod session;
 pub mod source;
 pub mod transition;
 pub mod ui;
+pub mod video;
