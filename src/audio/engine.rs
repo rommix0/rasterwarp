@@ -62,6 +62,7 @@ pub struct SoundSpan {
 /// One canvas frame of sound.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct AudioFrame {
+    /// The follow signals and beats for this frame.
     pub signals: Signals,
     /// Set when the source is a loaded file: what the soundtrack takes for this frame.
     pub sound: Option<SoundSpan>,
@@ -70,9 +71,13 @@ pub struct AudioFrame {
 /// A loaded file's state, for the panel.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileState {
+    /// The file's name.
     pub name: String,
+    /// Where the playhead is, in seconds.
     pub position: f64,
+    /// How long the file is, in seconds.
     pub length: f64,
+    /// Whether it is playing.
     pub playing: bool,
 }
 
@@ -120,7 +125,12 @@ pub struct Audio {
     output: String,
     speakers_on: bool,
     speakers: Option<Speakers>,
+    /// Why the source or a file load isn't working.
     error: Option<String>,
+    /// Why the speakers aren't working (kept apart so reopening them clears only this).
+    speaker_error: Option<String>,
+    /// Whether the last canvas frame moved time on (it doesn't while the app is paused).
+    advancing: bool,
     meter: Signals,
 }
 
@@ -154,6 +164,8 @@ impl Audio {
             speakers_on: false,
             speakers: None,
             error: None,
+            speaker_error: None,
+            advancing: false,
             meter: Signals::default(),
         }
     }
@@ -194,6 +206,7 @@ impl Audio {
     fn stop(&mut self) {
         self.current = Current::None;
         self.speakers = None;
+        self.speaker_error = None;
         self.reanalysis = None;
         self.reanalyse_again = false;
     }
@@ -244,7 +257,7 @@ impl Audio {
             }
         }
         if let Some(why) = self.speakers.as_ref().and_then(Speakers::failure) {
-            self.error = Some(format!("No sound output: {why}"));
+            self.speaker_error = Some(format!("No sound output: {why}"));
             self.speakers = None;
         }
         if let Some(tracks) = self.reanalysis.as_ref().and_then(Reanalysis::poll) {
@@ -339,6 +352,7 @@ impl Audio {
         frame.signals.values[Signal::Pulse.index()] = pulse;
         frame.signals.beats = beats;
         self.meter = frame.signals;
+        self.advancing = dt > 0.0;
         self.sync_speakers();
         frame
     }
@@ -449,11 +463,13 @@ impl Audio {
             self.open_speakers();
         } else {
             self.speakers = None;
+            self.speaker_error = None;
         }
     }
 
     fn open_speakers(&mut self) {
         self.speakers = None;
+        self.speaker_error = None;
         let Current::File(file) = &self.current else {
             return;
         };
@@ -462,16 +478,25 @@ impl Audio {
         }
         match Speakers::open(&self.output, file.sound.samples.clone()) {
             Ok(speakers) => self.speakers = Some(speakers),
-            Err(err) => self.error = Some(format!("No sound output: {err:#}")),
+            Err(err) => self.speaker_error = Some(format!("No sound output: {err:#}")),
         }
         self.sync_speakers();
+    }
+
+    /// Whether the speakers should be sounding: the file plays, isn't muted, and time is
+    /// moving (a paused app freezes the sound).
+    fn speakers_playing(&self) -> bool {
+        match &self.current {
+            Current::File(file) => file.playing && !self.muted && self.advancing,
+            _ => false,
+        }
     }
 
     fn sync_speakers(&self) {
         if let (Some(speakers), Current::File(file)) = (&self.speakers, &self.current) {
             speakers.follow(
                 file.position,
-                file.playing && !self.muted,
+                self.speakers_playing(),
                 self.looping,
                 self.volume,
             );
@@ -523,9 +548,10 @@ impl Audio {
         })
     }
 
-    /// Why the source or the speakers aren't working, if they aren't.
+    /// Why the source or the speakers aren't working, if they aren't (the source's
+    /// reason first).
     pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.error.as_deref().or(self.speaker_error.as_deref())
     }
 
     /// The last frame's signals, for the meter.
@@ -695,6 +721,37 @@ mod tests {
         };
         assert_eq!(audio.soundtrack(stopped, 2), [0; 4]);
         assert_eq!(Audio::new().soundtrack(span, 2), [0; 4], "no file, silence");
+    }
+
+    #[test]
+    fn a_paused_app_asks_the_speakers_to_stop() {
+        let mut audio = with_sound(tone_then_rest(1.0, 1.0));
+        audio.frame(FRAME);
+        assert!(audio.speakers_playing(), "a moving frame plays");
+        audio.frame(0.0);
+        assert!(!audio.speakers_playing(), "a paused frame stops");
+        audio.frame(FRAME);
+        assert!(audio.speakers_playing());
+        audio.set_muted(true);
+        audio.frame(FRAME);
+        assert!(!audio.speakers_playing(), "muted stops");
+    }
+
+    #[test]
+    fn reopening_the_speakers_clears_only_their_error() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        audio.speaker_error = Some("No sound output: gone".into());
+        assert_eq!(audio.error(), Some("No sound output: gone"));
+        audio.error = Some("load failed".into());
+        assert_eq!(
+            audio.error(),
+            Some("load failed"),
+            "the source's reason first"
+        );
+        // Speakers stay disabled here, so no stream opens; the reopen path still runs.
+        audio.set_output("other");
+        assert_eq!(audio.speaker_error, None);
+        assert_eq!(audio.error(), Some("load failed"), "the source error stays");
     }
 
     #[test]
