@@ -14,6 +14,7 @@ pub mod gpu;
 pub mod inputs;
 pub mod inputs_ui;
 pub mod midi;
+pub mod midi_ui;
 pub mod motion;
 pub mod params;
 pub mod passes;

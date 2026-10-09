@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::capture::recorder::RecordSettings;
+use crate::control::Link;
 use crate::params::Params;
 
 /// The file format version this build writes.
@@ -199,6 +200,9 @@ pub struct Settings {
     pub presets_folder: PathBuf,
     pub capture: RecordSettings,
     pub show_preview: bool,
+    /// The MIDI links; they belong to the controller, so every project uses them.
+    #[serde(with = "crate::control::saved_links")]
+    pub midi: Vec<Link>,
 }
 
 impl Default for Settings {
@@ -207,6 +211,7 @@ impl Default for Settings {
             presets_folder: PathBuf::from("presets"),
             capture: RecordSettings::default(),
             show_preview: true,
+            midi: Vec::new(),
         }
     }
 }
@@ -405,10 +410,30 @@ mod tests {
         settings.capture.mode = crate::capture::CaptureMode::Offline;
         settings.capture.stop_after = 12.5;
         settings.capture.alpha = true;
+        settings.midi = vec![crate::control::Link::new(
+            crate::control::Source::Cc {
+                channel: 1,
+                number: 1,
+            },
+            crate::control::Target::Slider(crate::params::table::SliderId::Zoom),
+        )];
         save_settings(&dir, &settings).unwrap();
         assert_eq!(load_settings(&dir), settings);
         fs::write(dir.join(SETTINGS_FILE), "{ broken").unwrap();
         assert_eq!(load_settings(&dir), Settings::default());
+    }
+
+    #[test]
+    fn settings_without_midi_links_load_with_none() {
+        let dir = temp_dir("settings-no-midi");
+        fs::write(
+            dir.join(SETTINGS_FILE),
+            r#"{ "format": "rasterwarp-settings", "version": 1, "show_preview": false }"#,
+        )
+        .unwrap();
+        let settings = load_settings(&dir);
+        assert!(!settings.show_preview);
+        assert!(settings.midi.is_empty());
     }
 
     #[test]

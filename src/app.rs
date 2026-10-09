@@ -21,10 +21,12 @@ use crate::capture::CaptureMode;
 use crate::capture::recorder::Recorder;
 use crate::capture::still;
 use crate::clock::{CanvasClock, Pacing};
+use crate::control::{Action, Links};
 use crate::files_ui::FileActions;
 use crate::gpu;
-use crate::inputs::{Input, View, is_image};
+use crate::inputs::{Input, Kind, View, is_image};
 use crate::inputs_ui::InputActions;
+use crate::midi::Midi;
 use crate::motion::{Mode, Motion};
 use crate::params::{Params, Role};
 use crate::passes::Renderer;
@@ -131,6 +133,8 @@ struct State {
     egui_renderer: egui_wgpu::Renderer,
     motion: Motion,
     recorder: Option<Recorder>,
+    /// The MIDI inputs; drained once per screen refresh.
+    midi: Midi,
     ui: UiState,
     /// Paces canvas frames at the program frame rate.
     clock: CanvasClock,
@@ -240,6 +244,7 @@ impl State {
             ..Default::default()
         };
         ui.capture.settings = settings.capture.clone();
+        ui.midi.links = Links::new(settings.midi.clone());
         let image = test_card();
         let renderer = Renderer::new(&device, &queue, composite_format, canvas::DEFAULT, &image);
 
@@ -275,6 +280,7 @@ impl State {
             egui_renderer,
             motion,
             recorder: None,
+            midi: Midi::new(),
             clock: CanvasClock::new(ui.rate, 0.0),
             ui,
             epoch,
@@ -397,6 +403,7 @@ impl State {
             presets_folder: self.ui.presets_folder.clone(),
             capture: self.ui.capture.settings.clone(),
             show_preview: self.ui.show_preview,
+            midi: self.ui.midi.links.list.clone(),
         }
     }
 
@@ -813,11 +820,7 @@ impl State {
             self.choose_map(role);
         }
         if let Some(role) = actions.toggle_loop {
-            if self.feeds[role.index()].looping().is_some() {
-                self.feeds[role.index()].release_loop();
-            } else {
-                self.grab_loop(role);
-            }
+            self.toggle_loop(role);
         }
         if let Some(role) = actions.grab_loop {
             self.grab_loop(role);
@@ -830,6 +833,60 @@ impl State {
             let mut file = self.inputs.get(role);
             file.slit_map = None;
             self.inputs.set(role, file);
+        }
+    }
+
+    /// Loops `role`'s camera, or goes back to live if it loops (F9, F10). Nothing
+    /// happens when the input isn't a camera.
+    fn toggle_loop(&mut self, role: Role) {
+        let feed = &mut self.feeds[role.index()];
+        if feed.kind() != Kind::Camera {
+            return;
+        }
+        if feed.looping().is_some() {
+            feed.release_loop();
+        } else {
+            self.grab_loop(role);
+        }
+    }
+
+    /// Applies what controllers sent since the last refresh, and runs the actions they
+    /// asked for.
+    fn handle_midi(&mut self) {
+        let messages = self.midi.poll(Instant::now());
+        self.ui.midi.devices = self.midi.devices();
+        self.ui.midi.failed = self.midi.failed().to_vec();
+        for message in messages {
+            for action in self.ui.midi.links.handle(message, &mut self.motion) {
+                self.run_action(action);
+            }
+        }
+    }
+
+    /// Does what an action's button or key does, and nothing where its button would be
+    /// disabled or missing.
+    fn run_action(&mut self, action: Action) {
+        let sequence = self.motion.mode() == Mode::Sequence;
+        match action {
+            Action::Transition => self.motion.trigger(),
+            Action::Cut => self.motion.cut(),
+            Action::SequenceRun if sequence => {
+                let seq = self.motion.sequence_mut();
+                if seq.is_running() {
+                    seq.stop();
+                } else {
+                    seq.run();
+                }
+            }
+            Action::SequenceReset if sequence => self.motion.sequence_mut().reset(),
+            Action::SequenceRun | Action::SequenceReset => {}
+            Action::SourceLoop => self.toggle_loop(Role::Source),
+            Action::BackgroundLoop => self.toggle_loop(Role::Background),
+            Action::Record if self.recorder.is_some() => self.stop_recording(),
+            Action::Record => self.start_recording(),
+            Action::SaveStill => self.save_still(),
+            Action::ClearTrails => self.clear_feedback(),
+            Action::Pause => self.ui.paused = !self.ui.paused,
         }
     }
 
@@ -1210,6 +1267,11 @@ impl State {
         let dt = (now - self.last_refresh).as_secs_f32();
         self.last_refresh = now;
         self.ui.frame_ms += (dt * 1000.0 - self.ui.frame_ms) * 0.05;
+
+        // Before anything can return early (minimized, no surface), so the MIDI channel
+        // is drained on every refresh, and before the panel draws, so a slider shows
+        // the new value in the same frame.
+        self.handle_midi();
 
         // While the window is minimized or hidden no canvas frames are drawn; that time
         // must not count as late frames when it reappears.

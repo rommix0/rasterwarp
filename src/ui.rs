@@ -12,6 +12,7 @@ use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::files_ui::{self, FileActions, FilesUi};
 use crate::inputs_ui::{self, InputActions, InputUi};
+use crate::midi_ui::MidiUi;
 use crate::motion::{Mode, Motion};
 use crate::params::{
     Axis, Envelope, OscInput, OscSync, Oscillator, Params, Role, Waveform, even_thresholds, ranges,
@@ -51,6 +52,8 @@ pub struct UiState {
     pub canvas: CanvasChoice,
     pub capture: CaptureUi,
     pub files: FilesUi,
+    /// MIDI devices and links.
+    pub midi: MidiUi,
 }
 
 /// The capture controls and what the current or last recording reported.
