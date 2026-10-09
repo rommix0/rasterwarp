@@ -99,6 +99,12 @@ impl PreviewView {
         self.renderer.set_background(device, queue, image);
     }
 
+    /// The preview's renderer, for its video and camera inputs (see
+    /// [`Renderer::set_frames`]). Its frames are the small copies, at preview size.
+    pub fn renderer_mut(&mut self) -> &mut Renderer {
+        &mut self.renderer
+    }
+
     pub fn clear_feedback(&self, encoder: &mut wgpu::CommandEncoder) {
         self.renderer.clear_feedback(encoder);
     }

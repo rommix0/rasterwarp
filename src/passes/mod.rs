@@ -10,21 +10,40 @@ pub mod raster;
 pub mod warp;
 
 use crate::blend::FrameParams;
-use crate::params::GlowParams;
+use crate::params::{GlowParams, Role};
 use crate::passes::composite::Area;
+use crate::passes::frames::FramesPass;
 use crate::source::{self, ColorImage, GrayImage};
+use crate::video::Pixels;
+use crate::video::playhead::Sample;
 
 /// The format of the capture texture that recordings are read from.
 pub const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+/// Where an input's picture comes from on the GPU.
+enum Picture {
+    Image(wgpu::TextureView),
+    /// A video or camera, drawn each frame by its frames pass.
+    Frames(Box<FramesPass>),
+}
+
+impl Picture {
+    fn view(&self) -> &wgpu::TextureView {
+        match self {
+            Picture::Image(view) => view,
+            Picture::Frames(pass) => &pass.target.view,
+        }
+    }
+}
 
 pub struct Renderer {
     size: (u32, u32),
     /// This renderer's pixels per program canvas pixel (see [`Renderer::set_pixel_scale`]).
     pixel_scale: f32,
-    source: wgpu::TextureView,
+    source: Picture,
     source_aspect: f32,
     /// What keyed levels show.
-    background: wgpu::TextureView,
+    background: Picture,
     background_aspect: f32,
     warp: warp::WarpPass,
     raster: raster::RasterPass,
@@ -52,10 +71,14 @@ impl Renderer {
         Self {
             size,
             pixel_scale: 1.0,
-            source: source::upload(device, queue, image).create_view(&Default::default()),
+            source: Picture::Image(
+                source::upload(device, queue, image).create_view(&Default::default()),
+            ),
             source_aspect: image.aspect(),
-            background: source::upload_color(device, queue, &ColorImage::black())
-                .create_view(&Default::default()),
+            background: Picture::Image(
+                source::upload_color(device, queue, &ColorImage::black())
+                    .create_view(&Default::default()),
+            ),
             background_aspect: 1.0,
             warp: warp::WarpPass::new(device, w, h),
             raster: raster::RasterPass::new(device),
@@ -102,7 +125,8 @@ impl Renderer {
     /// Shows a new source image. Its fit in the frame may differ, so this resets the beam
     /// motion (see [`Renderer::reset_motion`]).
     pub fn set_source(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &GrayImage) {
-        self.source = source::upload(device, queue, image).create_view(&Default::default());
+        self.source =
+            Picture::Image(source::upload(device, queue, image).create_view(&Default::default()));
         self.source_aspect = image.aspect();
         self.reset_motion();
     }
@@ -116,9 +140,64 @@ impl Renderer {
     ) {
         let black = ColorImage::black();
         let image = image.unwrap_or(&black);
-        self.background =
-            source::upload_color(device, queue, image).create_view(&Default::default());
+        self.background = Picture::Image(
+            source::upload_color(device, queue, image).create_view(&Default::default()),
+        );
         self.background_aspect = image.aspect();
+    }
+
+    /// Makes `role`'s input a video or camera with frames of `size` pixels, drawn by a
+    /// frames pass whose ring may grow to `max_layers` layers. A new source resets the
+    /// beam motion, like a new image.
+    pub fn set_frames(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        role: Role,
+        size: (u32, u32),
+        max_layers: u32,
+    ) {
+        let pass = FramesPass::new(device, queue, Pixels::for_role(role), size, max_layers);
+        let picture = Picture::Frames(Box::new(pass));
+        let aspect = size.0 as f32 / size.1 as f32;
+        match role {
+            Role::Source => {
+                self.source = picture;
+                self.source_aspect = aspect;
+                self.reset_motion();
+            }
+            Role::Background => {
+                self.background = picture;
+                self.background_aspect = aspect;
+            }
+        }
+    }
+
+    /// `role`'s frames pass, when its input is a video or camera.
+    pub fn frames_mut(&mut self, role: Role) -> Option<&mut FramesPass> {
+        let picture = match role {
+            Role::Source => &mut self.source,
+            Role::Background => &mut self.background,
+        };
+        match picture {
+            Picture::Frames(pass) => Some(pass),
+            Picture::Image(_) => None,
+        }
+    }
+
+    /// Draws `role`'s picture for this frame from its frames pass (whose window the
+    /// caller has filled; see [`FramesPass::missing`]). Nothing for an image.
+    pub fn draw_frames(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        role: Role,
+        sample: &Sample,
+    ) {
+        if let Some(pass) = self.frames_mut(role) {
+            pass.draw(device, queue, encoder, sample);
+        }
     }
 
     pub fn clear_feedback(&self, encoder: &mut wgpu::CommandEncoder) {
@@ -168,7 +247,7 @@ impl Renderer {
                 device,
                 queue,
                 encoder,
-                &self.source,
+                self.source.view(),
                 &self.warp.target.view,
                 &raster::uniforms(
                     &frame.raster,
@@ -180,7 +259,7 @@ impl Renderer {
             );
         } else {
             self.warp
-                .render(device, queue, encoder, &self.source, &deflection);
+                .render(device, queue, encoder, self.source.view(), &deflection);
         }
         self.previous = Some(deflection);
         self.colorize.render(
@@ -226,7 +305,7 @@ impl Renderer {
             encoder,
             self.feedback.output(),
             self.bloom.output(),
-            &self.background,
+            self.background.view(),
             output,
             area,
             &composite::uniforms(
@@ -257,7 +336,7 @@ impl Renderer {
             encoder,
             self.feedback.output(),
             self.bloom.output(),
-            &self.background,
+            self.background.view(),
             output,
             Area::whole(self.size),
             &composite::uniforms(

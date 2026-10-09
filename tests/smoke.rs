@@ -8,7 +8,7 @@ use rasterwarp::capture::recorder::{RecordSettings, Recorder};
 use rasterwarp::capture::still;
 use rasterwarp::gpu;
 use rasterwarp::motion::{Mode, Motion};
-use rasterwarp::params::{Between, Params, Slit};
+use rasterwarp::params::{Between, Params, Role, Slit};
 use rasterwarp::passes::Renderer;
 use rasterwarp::passes::composite::Area;
 use rasterwarp::passes::frames::FramesPass;
@@ -998,6 +998,114 @@ fn slit_scan_follows_the_map_image() {
     let pixels = draw_frames(&device, &queue, &frames, size, &sample, Some(&map));
     assert_eq!(pixels[0], 180, "now: frame 6");
     assert_eq!(pixels[15], 60, "the depth ago: frame 2");
+}
+
+/// Fills `role`'s frames pass with those of `frames` in `sample`'s window and draws
+/// `sample` into `encoder`.
+fn feed(
+    renderer: &mut Renderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    encoder: &mut wgpu::CommandEncoder,
+    role: Role,
+    frames: &[Vec<u8>],
+    sample: &Sample,
+) {
+    let pass = renderer.frames_mut(role).expect("a frames input");
+    for k in pass.missing(device, sample) {
+        if let Some(frame) = frames.get(k as usize) {
+            pass.upload(queue, k, frame);
+        }
+    }
+    renderer.draw_frames(device, queue, encoder, role, sample);
+}
+
+#[test]
+fn a_video_source_goes_through_the_whole_pipeline() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (128, 72);
+    let mut params = flat_params();
+    params.colorize.bypass = true;
+    let frame = FrameParams::at_rest(&params);
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let output = gpu::RenderTarget::new(&device, "video source", size.0, size.1, format);
+    let mut renderer = Renderer::new(&device, &queue, format, size, &test_card(64, 36));
+    renderer.set_frames(&device, &queue, Role::Source, (64, 36), 8);
+    let frames = flat_frames(&[0, 255], (64, 36));
+    let mut middle = |base| {
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let sample = still_sample(base, Between::Nearest);
+        feed(
+            &mut renderer,
+            &device,
+            &queue,
+            &mut encoder,
+            Role::Source,
+            &frames,
+            &sample,
+        );
+        renderer.render(
+            &device,
+            &queue,
+            &mut encoder,
+            &frame,
+            0.0,
+            &output.view,
+            size,
+        );
+        queue.submit([encoder.finish()]);
+        read_back(&device, &queue, &output.texture)[((36 * size.0 + 64) * 4) as usize]
+    };
+    assert!(middle(0.0) < 10, "frame 0 is black");
+    assert!(middle(1.0) > 245, "frame 1 is white");
+}
+
+#[test]
+fn keyed_levels_show_a_video_background() {
+    let Some(KeyingSetup {
+        device,
+        queue,
+        mut renderer,
+        output,
+        params,
+        size,
+    }) = setup_keying_test()
+    else {
+        return;
+    };
+    renderer.set_frames(&device, &queue, Role::Background, (2, 2), 8);
+    let green = [0, 255, 0, 255].repeat(4);
+    let frames = vec![[255, 0, 0, 255].repeat(4), green];
+    let mut encoder = device.create_command_encoder(&Default::default());
+    let sample = still_sample(1.0, Between::Nearest);
+    feed(
+        &mut renderer,
+        &device,
+        &queue,
+        &mut encoder,
+        Role::Background,
+        &frames,
+        &sample,
+    );
+    renderer.render(
+        &device,
+        &queue,
+        &mut encoder,
+        &FrameParams::at_rest(&params),
+        0.0,
+        &output.view,
+        size,
+    );
+    queue.submit([encoder.finish()]);
+    let pixels = read_back(&device, &queue, &output.texture);
+    let i = ((size.1 / 2 * size.0 + 40) * 4) as usize;
+    assert_eq!(
+        &pixels[i..i + 3],
+        &[0, 255, 0],
+        "the keyed level shows frame 1"
+    );
 }
 
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
