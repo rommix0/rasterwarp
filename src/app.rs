@@ -1180,11 +1180,16 @@ impl State {
     fn start_recording(&mut self) {
         self.audio.hold();
         self.ui.capture.saved = None;
-        let started = Recorder::start(
+        let sound = self.audio.file().is_some();
+        if sound && self.ui.audio.start_with_recording {
+            self.audio.restart();
+        }
+        let started = Recorder::start_with_sound(
             &self.device,
             &self.ui.capture.settings,
             self.renderer.size(),
             self.clock.rate(),
+            sound,
         );
         // Opening the encoder stalls, even when it fails; that must not make canvas
         // frames late.
@@ -1338,13 +1343,28 @@ impl State {
             if let Err(err) = captured {
                 log::warn!("{err:#}");
                 capture_failed = true;
+            } else if recorder.has_sound() {
+                // Silence keeps the soundtrack in step if the source changed away from
+                // the file mid-recording.
+                let frames = recorder.sound_frames();
+                let samples = match audio_frame.sound {
+                    Some(span) => self.audio.soundtrack(span, frames),
+                    None => vec![0; frames * 2],
+                };
+                if let Err(err) = recorder.add_sound(samples) {
+                    log::warn!("{err:#}");
+                    capture_failed = true;
+                }
             }
         }
         self.queue.submit([encoder.finish()]);
         if let Some(recorder) = &mut self.recorder {
             recorder.after_submit();
             self.ui.capture.status = Some(recorder.status());
-            if capture_failed || recorder.finished_recording() {
+            if capture_failed
+                || recorder.finished_recording()
+                || (recorder.has_sound() && self.audio.ended())
+            {
                 self.stop_recording();
             }
         }

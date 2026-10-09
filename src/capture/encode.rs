@@ -6,7 +6,10 @@ use std::sync::mpsc::{self, Receiver, Sender, SyncSender, TrySendError};
 use std::thread::JoinHandle;
 
 use anyhow::{Context, Result, anyhow, bail};
-use ff::{Dictionary, Packet, Rational, codec, encoder, format, frame, software::scaling};
+use ff::format::sample::{Sample, Type};
+use ff::{
+    ChannelLayout, Dictionary, Packet, Rational, codec, encoder, format, frame, software::scaling,
+};
 use ffmpeg_next as ff;
 
 use crate::rate::FrameRate;
@@ -76,6 +79,7 @@ pub struct Frame {
 /// A running encoder thread. Dropping it without [`Encoder::finish`] still closes the file.
 pub struct Encoder {
     frames: Option<SyncSender<Frame>>,
+    sound: Option<Sender<Vec<i16>>>,
     recycled: Receiver<Vec<u8>>,
     thread: Option<JoinHandle<Result<u64>>>,
 }
@@ -90,20 +94,47 @@ impl Encoder {
         size: (u32, u32),
         rate: FrameRate,
     ) -> Result<Self> {
+        Self::start_with_sound(path, format, size, rate, false)
+    }
+
+    /// Like [`Encoder::start`], with a second stream for a soundtrack when `sound` is
+    /// set: AAC in HEVC files, 16-bit PCM in the others. Feed it with
+    /// [`Encoder::send_sound`].
+    pub fn start_with_sound(
+        path: &Path,
+        format: VideoFormat,
+        size: (u32, u32),
+        rate: FrameRate,
+        sound: bool,
+    ) -> Result<Self> {
         if path.exists() {
             bail!("{} already exists", path.display());
         }
         let (frames, frames_rx) = mpsc::sync_channel(QUEUE);
         let (recycle_tx, recycled) = mpsc::channel();
         let (ready_tx, ready) = mpsc::sync_channel(1);
+        let (sound_tx, sound_rx) = mpsc::channel();
         let owned = path.to_path_buf();
         let thread = std::thread::Builder::new()
             .name("encoder".into())
-            .spawn(move || run(owned, format, size, rate, frames_rx, recycle_tx, ready_tx))
+            .spawn(move || {
+                let job = Job {
+                    path: owned,
+                    format,
+                    size,
+                    rate,
+                    frames: frames_rx,
+                    sound: sound.then_some(sound_rx),
+                    recycled: recycle_tx,
+                    ready: ready_tx,
+                };
+                run(job)
+            })
             .context("could not start the encoder thread")?;
         match ready.recv() {
             Ok(Ok(())) => Ok(Self {
                 frames: Some(frames),
+                sound: sound.then_some(sound_tx),
                 recycled,
                 thread: Some(thread),
             }),
@@ -129,6 +160,18 @@ impl Encoder {
             .map_err(|_| anyhow!("the encoder stopped"))
     }
 
+    /// Queues interleaved stereo samples (48 kHz) for the soundtrack. Sound is never
+    /// dropped, even when video frames are.
+    pub fn send_sound(&self, samples: Vec<i16>) -> Result<()> {
+        let sound = self
+            .sound
+            .as_ref()
+            .ok_or_else(|| anyhow!("this recording has no soundtrack"))?;
+        sound
+            .send(samples)
+            .map_err(|_| anyhow!("the encoder stopped"))
+    }
+
     /// A frame buffer the encoder has finished with, for reuse.
     pub fn recycled_buffer(&self) -> Option<Vec<u8>> {
         self.recycled.try_recv().ok()
@@ -138,6 +181,7 @@ impl Encoder {
     /// or the error that stopped the encoder.
     pub fn finish(mut self) -> Result<u64> {
         self.frames = None;
+        self.sound = None;
         match self.thread.take().map(JoinHandle::join) {
             Some(Ok(result)) => result,
             Some(Err(_)) => Err(anyhow!("the encoder thread panicked")),
@@ -165,22 +209,38 @@ pub(super) fn try_queue(queue: &SyncSender<Frame>, frame: Frame) -> Result<Optio
 impl Drop for Encoder {
     fn drop(&mut self) {
         self.frames = None;
+        self.sound = None;
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
     }
 }
 
-fn run(
+/// What the encoder thread needs to run.
+struct Job {
     path: PathBuf,
     format: VideoFormat,
     size: (u32, u32),
     rate: FrameRate,
     frames: Receiver<Frame>,
+    /// Present when the recording has a soundtrack.
+    sound: Option<Receiver<Vec<i16>>>,
     recycled: Sender<Vec<u8>>,
     ready: SyncSender<Result<()>>,
-) -> Result<u64> {
-    let mut sink = match Sink::open(&path, format, size, rate) {
+}
+
+fn run(job: Job) -> Result<u64> {
+    let Job {
+        path,
+        format,
+        size,
+        rate,
+        frames,
+        sound,
+        recycled,
+        ready,
+    } = job;
+    let mut sink = match Sink::open(&path, format, size, rate, sound.is_some()) {
         Ok(sink) => {
             let _ = ready.send(Ok(()));
             sink
@@ -192,6 +252,14 @@ fn run(
     };
     let mut written = 0;
     for frame in frames {
+        if let Some(sound) = &sound {
+            for samples in sound.try_iter() {
+                if let Err(err) = sink.write_sound(&samples) {
+                    let _ = sink.finish();
+                    return Err(err.context("encoding the soundtrack"));
+                }
+            }
+        }
         if let Err(err) = sink.write(&frame) {
             // Keep what was written playable where possible.
             let _ = sink.finish();
@@ -199,6 +267,15 @@ fn run(
         }
         written += 1;
         let _ = recycled.send(frame.rgba);
+    }
+    // The frame channel is closed, and the sound one closes right after it.
+    if let Some(sound) = sound {
+        for samples in sound.iter() {
+            if let Err(err) = sink.write_sound(&samples) {
+                let _ = sink.finish();
+                return Err(err.context("encoding the soundtrack"));
+            }
+        }
     }
     sink.finish()?;
     Ok(written)
@@ -224,10 +301,35 @@ struct Sink {
     /// One frame: the time base the frames' timestamps count in.
     time_base: Rational,
     stream_time_base: Rational,
+    sound: Option<SoundTrack>,
 }
 
+/// The soundtrack's encoder and stream.
+struct SoundTrack {
+    encoder: encoder::Audio,
+    index: usize,
+    stream_time_base: Rational,
+    /// Interleaved stereo samples not yet sent (the encoder takes whole frames).
+    pending: Vec<i16>,
+    /// The next sample's position since the start.
+    next_pts: i64,
+    /// Stereo frames per encoder frame.
+    frame_size: usize,
+    /// AAC takes planar floats; PCM takes packed 16-bit.
+    planar: bool,
+}
+
+/// The sample time base: one sample at 48 kHz.
+const SOUND_TIME_BASE: Rational = Rational(1, 48_000);
+
 impl Sink {
-    fn open(path: &Path, format: VideoFormat, size: (u32, u32), rate: FrameRate) -> Result<Self> {
+    fn open(
+        path: &Path,
+        format: VideoFormat,
+        size: (u32, u32),
+        rate: FrameRate,
+        sound: bool,
+    ) -> Result<Self> {
         ff::init().context("could not initialise FFmpeg")?;
         let (width, height) = size;
         let frame_rate = Rational(rate.num, rate.den);
@@ -321,15 +423,72 @@ impl Sink {
         // Declare the constant frame rate so players don't have to infer it.
         stream.set_rate(frame_rate);
         stream.set_avg_frame_rate(frame_rate);
+        let mut track = None;
+        if sound {
+            let (name, sample) = match format {
+                VideoFormat::Hevc => ("aac", Sample::F32(Type::Planar)),
+                VideoFormat::Ffv1 | VideoFormat::ProRes4444 => {
+                    ("pcm_s16le", Sample::I16(Type::Packed))
+                }
+            };
+            let codec = encoder::find_by_name(name)
+                .ok_or_else(|| anyhow!("this FFmpeg build has no {name} encoder"))?;
+            let mut stream = output.add_stream(codec)?;
+            let index = stream.index();
+            let mut setup = codec::context::Context::new_with_codec(codec)
+                .encoder()
+                .audio()?;
+            setup.set_rate(48_000);
+            setup.set_channel_layout(ChannelLayout::STEREO);
+            setup.set_format(sample);
+            setup.set_time_base(SOUND_TIME_BASE);
+            if format == VideoFormat::Hevc {
+                setup.set_bit_rate(192_000);
+            }
+            if global_header {
+                setup.set_flags(codec::Flags::GLOBAL_HEADER);
+            }
+            let encoder = setup
+                .open_as(codec)
+                .with_context(|| format!("could not open the {name} encoder"))?;
+            stream.set_parameters(&encoder);
+            stream.set_time_base(SOUND_TIME_BASE);
+            let frame_size = match encoder.frame_size() {
+                0 => 1024,
+                n => n as usize,
+            };
+            track = Some(SoundTrack {
+                encoder,
+                index,
+                stream_time_base: SOUND_TIME_BASE,
+                pending: Vec::new(),
+                next_pts: 0,
+                frame_size,
+                planar: sample == Sample::F32(Type::Planar),
+            });
+        }
         let mut header = Dictionary::new();
         if format == VideoFormat::Hevc {
             // Fragmented MP4 stays playable if the recording is interrupted.
             header.set("movflags", "frag_keyframe+empty_moov");
+            if track.is_some() {
+                // AAC starts 1024 samples early (encoder priming). The muxer only writes
+                // the edit list that trims it when the header is delayed to the first
+                // fragment; without it the sound would lag the picture by 21 ms.
+                header.set("movflags", "frag_keyframe+empty_moov+delay_moov");
+                header.set("use_editlist", "1");
+            }
         }
         output
             .write_header_with(header)
             .context("could not write the file header")?;
         let stream_time_base = output.stream(0).context("no video stream")?.time_base();
+        if let Some(track) = &mut track {
+            track.stream_time_base = output
+                .stream(track.index)
+                .context("no sound stream")?
+                .time_base();
+        }
 
         let convert = match format {
             VideoFormat::Hevc | VideoFormat::ProRes4444 => {
@@ -373,6 +532,7 @@ impl Sink {
             size,
             time_base,
             stream_time_base,
+            sound: track,
         })
     }
 
@@ -433,9 +593,76 @@ impl Sink {
         }
     }
 
+    /// Queues soundtrack samples and encodes every whole frame of them.
+    fn write_sound(&mut self, samples: &[i16]) -> Result<()> {
+        let Some(track) = &mut self.sound else {
+            return Ok(());
+        };
+        track.pending.extend_from_slice(samples);
+        while track.pending.len() >= track.frame_size * 2 {
+            let chunk: Vec<i16> = track.pending.drain(..track.frame_size * 2).collect();
+            Self::send_sound(track, &mut self.output, &chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Encodes one frame of interleaved stereo samples.
+    fn send_sound(
+        track: &mut SoundTrack,
+        output: &mut format::context::Output,
+        chunk: &[i16],
+    ) -> Result<()> {
+        let samples = chunk.len() / 2;
+        let format = if track.planar {
+            Sample::F32(Type::Planar)
+        } else {
+            Sample::I16(Type::Packed)
+        };
+        let mut frame = frame::Audio::new(format, samples, ChannelLayout::STEREO);
+        frame.set_rate(48_000);
+        if track.planar {
+            for (i, pair) in chunk.as_chunks::<2>().0.iter().enumerate() {
+                frame.plane_mut::<f32>(0)[i] = f32::from(pair[0]) / 32768.0;
+                frame.plane_mut::<f32>(1)[i] = f32::from(pair[1]) / 32768.0;
+            }
+        } else {
+            frame.plane_mut::<i16>(0).copy_from_slice(chunk);
+        }
+        frame.set_pts(Some(track.next_pts));
+        track.next_pts += samples as i64;
+        track.encoder.send_frame(&frame)?;
+        Self::drain_sound(track, output)
+    }
+
+    /// Writes the soundtrack's finished packets.
+    fn drain_sound(track: &mut SoundTrack, output: &mut format::context::Output) -> Result<()> {
+        let mut packet = Packet::empty();
+        loop {
+            match track.encoder.receive_packet(&mut packet) {
+                Ok(()) => {
+                    packet.set_stream(track.index);
+                    packet.rescale_ts(SOUND_TIME_BASE, track.stream_time_base);
+                    packet.write_interleaved(output)?;
+                }
+                // As for video: EAGAIN wants more input; Eof follows the final flush.
+                Err(ff::Error::Other { errno }) if errno == ff::error::EAGAIN => return Ok(()),
+                Err(ff::Error::Eof) => return Ok(()),
+                Err(err) => return Err(err.into()),
+            }
+        }
+    }
+
     fn finish(&mut self) -> Result<()> {
         self.encoder.send_eof()?;
         self.drain()?;
+        if let Some(track) = &mut self.sound {
+            if !track.pending.is_empty() {
+                let rest = std::mem::take(&mut track.pending);
+                Self::send_sound(track, &mut self.output, &rest)?;
+            }
+            track.encoder.send_eof()?;
+            Self::drain_sound(track, &mut self.output)?;
+        }
         self.output.write_trailer()?;
         Ok(())
     }

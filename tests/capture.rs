@@ -255,3 +255,95 @@ fn prores_4444_keeps_alpha() {
     let mean = error as f64 / opaque;
     assert!(mean < 3.0, "mean error {mean:.2} per channel");
 }
+
+/// Stereo samples of a 440 Hz tone for frame `pts`: `per_frame` stereo frames.
+fn tone(pts: i64, per_frame: usize) -> Vec<i16> {
+    (0..per_frame)
+        .flat_map(|i| {
+            let n = pts as f32 * per_frame as f32 + i as f32;
+            let v = ((std::f32::consts::TAU * 440.0 * n / 48_000.0).sin() * 8000.0) as i16;
+            [v, v]
+        })
+        .collect()
+}
+
+/// The audio stream's codec, rate, channels, and how many stereo frames decode.
+fn decode_sound(path: &Path) -> (ff::codec::Id, u32, u16, usize) {
+    ff::init().unwrap();
+    let mut input = ff::format::input(path).unwrap();
+    let stream = input
+        .streams()
+        .best(ff::media::Type::Audio)
+        .expect("a sound stream");
+    let index = stream.index();
+    let mut decoder = ff::codec::context::Context::from_parameters(stream.parameters())
+        .unwrap()
+        .decoder()
+        .audio()
+        .unwrap();
+    let (id, rate, channels) = (decoder.id(), decoder.rate(), decoder.channels());
+    let mut frames = 0;
+    let mut decoded = ff::frame::Audio::empty();
+    for (stream, packet) in input.packets() {
+        if stream.index() == index {
+            decoder.send_packet(&packet).unwrap();
+            while decoder.receive_frame(&mut decoded).is_ok() {
+                frames += decoded.samples();
+            }
+        }
+    }
+    decoder.send_eof().unwrap();
+    while decoder.receive_frame(&mut decoded).is_ok() {
+        frames += decoded.samples();
+    }
+    (id, rate, channels, frames)
+}
+
+#[test]
+fn soundtracks_are_written_and_last_as_long_as_the_video() {
+    let rate = FrameRate::whole(30);
+    let per_frame = 1600; // 48 000 / 30
+    for (format, codec) in [
+        (VideoFormat::Ffv1, ff::codec::Id::PCM_S16LE),
+        (VideoFormat::ProRes4444, ff::codec::Id::PCM_S16LE),
+        (VideoFormat::Hevc, ff::codec::Id::AAC),
+    ] {
+        let path = temp_file(&format!("sound-{format:?}"), format.extension());
+        let encoder = match Encoder::start_with_sound(&path, format, SIZE, rate, true) {
+            Ok(encoder) => encoder,
+            Err(err) if format == VideoFormat::Hevc => {
+                eprintln!("skipping HEVC soundtrack: {err:#}");
+                continue;
+            }
+            Err(err) => panic!("{err:#}"),
+        };
+        for pts in 0..FRAMES {
+            encoder
+                .send(Frame {
+                    pts,
+                    rgba: pattern(pts),
+                })
+                .unwrap();
+            encoder.send_sound(tone(pts, per_frame)).unwrap();
+        }
+        encoder.finish().unwrap();
+        let (id, sound_rate, channels, frames) = decode_sound(&path);
+        assert_eq!(id, codec, "{format:?}");
+        assert_eq!((sound_rate, channels), (48_000, 2), "{format:?}");
+        let sent = FRAMES as usize * per_frame;
+        let slack = if codec == ff::codec::Id::AAC { 1024 } else { 0 };
+        assert!(
+            frames.abs_diff(sent) <= slack,
+            "{format:?}: decoded {frames} of {sent} sound frames"
+        );
+    }
+}
+
+#[test]
+fn a_recording_without_sound_has_no_sound_stream() {
+    let path = temp_file("no-sound", "mkv");
+    encode(&path, VideoFormat::Ffv1, FrameRate::whole(30)).unwrap();
+    ff::init().unwrap();
+    let input = ff::format::input(&path).unwrap();
+    assert!(input.streams().best(ff::media::Type::Audio).is_none());
+}

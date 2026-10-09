@@ -69,6 +69,9 @@ pub struct Recorder {
     mode: CaptureMode,
     stop_after: f32,
     alpha: bool,
+    rate: FrameRate,
+    /// Whether the recording has a soundtrack.
+    sound: bool,
     path: PathBuf,
     started: Instant,
     frames: u64,
@@ -86,6 +89,18 @@ impl Recorder {
         canvas: (u32, u32),
         rate: FrameRate,
     ) -> Result<Self> {
+        Self::start_with_sound(device, settings, canvas, rate, false)
+    }
+
+    /// Like [`Recorder::start`], with a soundtrack stream when `sound` is set; add to it
+    /// with [`Recorder::add_sound`] after each captured frame.
+    pub fn start_with_sound(
+        device: &wgpu::Device,
+        settings: &RecordSettings,
+        canvas: (u32, u32),
+        rate: FrameRate,
+        sound: bool,
+    ) -> Result<Self> {
         settings.check()?;
         if staging_bytes(canvas) > device.limits().max_buffer_size {
             bail!(
@@ -98,7 +113,7 @@ impl Recorder {
             .with_context(|| format!("could not create {}", settings.folder.display()))?;
         let now = chrono::Local::now().naive_local();
         let path = unused_path(&settings.folder, &file_name(now, settings.format));
-        let encoder = Encoder::start(&path, settings.format, canvas, rate)?;
+        let encoder = Encoder::start_with_sound(&path, settings.format, canvas, rate, sound)?;
         Ok(Self {
             encoder,
             readback: Readback::new(device, canvas),
@@ -106,6 +121,8 @@ impl Recorder {
             mode: settings.mode,
             stop_after: settings.stop_after,
             alpha: settings.alpha,
+            rate,
+            sound,
             path,
             started: Instant::now(),
             frames: 0,
@@ -121,6 +138,24 @@ impl Recorder {
     /// Whether frames are captured with a transparent background.
     pub fn alpha(&self) -> bool {
         self.alpha
+    }
+
+    /// Whether this recording has a soundtrack.
+    pub fn has_sound(&self) -> bool {
+        self.sound
+    }
+
+    /// Stereo sound frames the frame just captured covers.
+    pub fn sound_frames(&self) -> usize {
+        sound_frames_for(self.rate, self.clock.frames() - 1)
+    }
+
+    /// Adds the soundtrack for the frame just captured.
+    pub fn add_sound(&mut self, samples: Vec<i16>) -> Result<()> {
+        if self.sound {
+            self.encoder.send_sound(samples)?;
+        }
+        Ok(())
     }
 
     /// Call once per screen refresh, before drawing its canvas frames: hands frames that
@@ -222,6 +257,18 @@ impl Recorder {
     }
 }
 
+/// Stereo sound frames (at 48 kHz) that video frame `n` covers at `rate`: frame `n`
+/// runs from sample `round(n·48000/fps)` to `round((n+1)·48000/fps)`, so the sound
+/// never drifts from the video.
+pub fn sound_frames_for(rate: FrameRate, n: i64) -> usize {
+    let at = |n: i64| -> i64 {
+        let num = i128::from(rate.num);
+        let scaled = i128::from(n) * 48_000 * i128::from(rate.den);
+        ((scaled * 2 + num) / (num * 2)) as i64
+    };
+    (at(n + 1) - at(n)) as usize
+}
+
 /// Counts a frame offered to the encoder without waiting. `rejected` is the frame a full
 /// queue handed back: it counts as dropped, and its buffer is kept in `spare` for reuse.
 fn count_offer(
@@ -277,5 +324,14 @@ mod tests {
             "opaque HEVC records"
         );
         assert!(!RecordSettings::default().alpha, "alpha starts off");
+    }
+
+    #[test]
+    fn sound_frames_per_video_frame_add_up_exactly() {
+        let rate = FrameRate::ntsc(24); // 24000/1001
+        let total: usize = (0..1000).map(|n| sound_frames_for(rate, n)).sum();
+        let exact = (1000.0 * 48_000.0 * 1001.0 / 24_000.0_f64).round() as usize;
+        assert_eq!(total, exact);
+        assert_eq!(sound_frames_for(FrameRate::whole(30), 7), 1600);
     }
 }
