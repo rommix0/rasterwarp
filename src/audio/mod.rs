@@ -2,9 +2,12 @@
 //! sliders follow, and beats that fire options and actions the way a MIDI key does.
 
 pub mod analysis;
+mod engine;
 pub mod file;
 pub mod input;
 pub mod output;
+
+pub use engine::{Audio, AudioFrame, FileState, SoundSpan, SourceChoice};
 
 use std::ops::RangeInclusive;
 
