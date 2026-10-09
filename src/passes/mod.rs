@@ -5,6 +5,7 @@ pub mod bloom;
 pub mod colorize;
 pub mod composite;
 pub mod feedback;
+pub mod frames;
 pub mod raster;
 pub mod warp;
 

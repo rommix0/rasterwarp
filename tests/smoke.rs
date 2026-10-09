@@ -8,12 +8,15 @@ use rasterwarp::capture::recorder::{RecordSettings, Recorder};
 use rasterwarp::capture::still;
 use rasterwarp::gpu;
 use rasterwarp::motion::{Mode, Motion};
-use rasterwarp::params::Params;
+use rasterwarp::params::{Between, Params, Slit};
 use rasterwarp::passes::Renderer;
 use rasterwarp::passes::composite::Area;
+use rasterwarp::passes::frames::FramesPass;
 use rasterwarp::preview::PreviewView;
 use rasterwarp::rate::FrameRate;
 use rasterwarp::source::{ColorImage, GrayImage, test_card};
+use rasterwarp::video::Pixels;
+use rasterwarp::video::playhead::Sample;
 
 const OUT_W: u32 = 320;
 const OUT_H: u32 = 180;
@@ -856,11 +859,163 @@ fn keyed_levels_show_the_background_after_clearing_trails() {
     assert_eq!(px(200), [255, 255, 255], "the white level stays");
 }
 
+/// Frame `k` of a test clip: flat gray at `levels[k]`.
+fn flat_frames(levels: &[u8], size: (u32, u32)) -> Vec<Vec<u8>> {
+    levels
+        .iter()
+        .map(|&g| vec![g; (size.0 * size.1) as usize])
+        .collect()
+}
+
+/// Draws `sample` from `frames` (luma) through a frames pass and reads back the R8 output.
+fn draw_frames(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    frames: &[Vec<u8>],
+    size: (u32, u32),
+    sample: &Sample,
+    map: Option<&GrayImage>,
+) -> Vec<u8> {
+    let mut pass = FramesPass::new(device, queue, Pixels::Luma, size, 256);
+    pass.set_map(device, queue, map);
+    for k in pass.missing(device, sample) {
+        if let Some(frame) = usize::try_from(k).ok().and_then(|k| frames.get(k)) {
+            pass.upload(queue, k, frame);
+        }
+    }
+    assert!(
+        pass.missing(device, sample)
+            .iter()
+            .all(|&k| k >= frames.len() as i64)
+    );
+    let mut encoder = device.create_command_encoder(&Default::default());
+    pass.draw(device, queue, &mut encoder, sample);
+    queue.submit([encoder.finish()]);
+    read_back_texels(device, queue, &pass.target.texture, 1)
+}
+
+fn still_sample(base: f64, between: Between) -> Sample {
+    Sample {
+        base,
+        reach: 0.0,
+        first: base.floor() as i64,
+        last: base.floor() as i64 + 1,
+        between,
+        slit: Slit::Off,
+        flip: false,
+    }
+}
+
+#[test]
+fn the_frames_pass_shows_or_blends_neighbouring_frames() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (8, 4);
+    let frames = flat_frames(&[0, 100, 200, 250], size);
+    let middle = |base, between| {
+        draw_frames(
+            &device,
+            &queue,
+            &frames,
+            size,
+            &still_sample(base, between),
+            None,
+        )[13]
+    };
+    assert_eq!(middle(1.0, Between::Blend), 100);
+    assert!(middle(1.5, Between::Blend).abs_diff(150) <= 1);
+    assert!(middle(2.25, Between::Blend).abs_diff(213) <= 1);
+    assert_eq!(middle(1.4, Between::Nearest), 100);
+    assert_eq!(middle(1.6, Between::Nearest), 200);
+}
+
+#[test]
+fn slit_scan_rows_show_older_frames_further_down() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (4, 16);
+    let frames = flat_frames(&[0, 30, 60, 90, 120, 150, 180, 210], size);
+    let sample = Sample {
+        base: 7.0,
+        reach: 7.0,
+        first: 0,
+        last: 8,
+        between: Between::Blend,
+        slit: Slit::Rows,
+        flip: false,
+    };
+    let pixels = draw_frames(&device, &queue, &frames, size, &sample, None);
+    for y in 0..size.1 {
+        let expected = 30.0 * (7.0 - 7.0 * (y as f64 + 0.5) / 16.0);
+        let got = pixels[(y * size.0) as usize];
+        assert!(
+            (f64::from(got) - expected).abs() <= 1.5,
+            "row {y}: {got} vs {expected}"
+        );
+    }
+    // Flipped, the bottom row is now and the top is the depth ago.
+    let flipped = draw_frames(
+        &device,
+        &queue,
+        &frames,
+        size,
+        &Sample {
+            flip: true,
+            ..sample
+        },
+        None,
+    );
+    assert!(
+        flipped[0] < 15 && flipped[(15 * size.0) as usize] > 195,
+        "{flipped:?}"
+    );
+}
+
+#[test]
+fn slit_scan_follows_the_map_image() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (16, 4);
+    let frames = flat_frames(&[0, 30, 60, 90, 120, 150, 180, 210], size);
+    // Black on the left (now), white on the right (the depth ago).
+    let map = GrayImage {
+        width: 2,
+        height: 1,
+        pixels: vec![0, 255],
+    };
+    let sample = Sample {
+        base: 6.0,
+        reach: 4.0,
+        first: 2,
+        last: 7,
+        between: Between::Nearest,
+        slit: Slit::Map,
+        flip: false,
+    };
+    let pixels = draw_frames(&device, &queue, &frames, size, &sample, Some(&map));
+    assert_eq!(pixels[0], 180, "now: frame 6");
+    assert_eq!(pixels[15], 60, "the depth ago: frame 2");
+}
+
 /// Copies a 4-byte-per-pixel texture into memory, removing the 256-byte row padding
 /// that buffer copies require.
 fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture) -> Vec<u8> {
+    read_back_texels(device, queue, texture, 4)
+}
+
+/// Copies a texture of `bytes` bytes per pixel into memory, removing the 256-byte row
+/// padding that buffer copies require.
+fn read_back_texels(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    bytes: u32,
+) -> Vec<u8> {
     let (width, height) = (texture.width(), texture.height());
-    let row = width * 4;
+    let row = width * bytes;
     let padded =
         row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {

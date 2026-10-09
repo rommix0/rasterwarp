@@ -146,6 +146,18 @@ pub struct FullscreenPass {
 
 impl FullscreenPass {
     pub fn new(device: &wgpu::Device, desc: &PassDesc) -> Self {
+        let flat = vec![wgpu::TextureViewDimension::D2; desc.textures as usize];
+        Self::with_dimensions(device, desc, &flat)
+    }
+
+    /// Like [`FullscreenPass::new`], with each texture's view dimension given (e.g. a
+    /// 2D array); `dimensions` has one entry per texture.
+    pub fn with_dimensions(
+        device: &wgpu::Device,
+        desc: &PassDesc,
+        dimensions: &[wgpu::TextureViewDimension],
+    ) -> Self {
+        assert_eq!(dimensions.len(), desc.textures as usize);
         let mut entries = vec![
             wgpu::BindGroupLayoutEntry {
                 binding: 0,
@@ -165,13 +177,13 @@ impl FullscreenPass {
                 count: None,
             },
         ];
-        for i in 0..desc.textures {
+        for (i, &view_dimension) in (0..).zip(dimensions) {
             entries.push(wgpu::BindGroupLayoutEntry {
                 binding: 2 + i,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
                     sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                    view_dimension: wgpu::TextureViewDimension::D2,
+                    view_dimension,
                     multisampled: false,
                 },
                 count: None,
