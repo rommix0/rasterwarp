@@ -86,6 +86,9 @@ struct FileSource {
     sound: Sound,
     position: f64,
     playing: bool,
+    /// Where the playhead was when the last canvas frame was drawn: what the speakers
+    /// follow, so the sound matches the picture.
+    drawn: f64,
 }
 
 /// What is playing now.
@@ -233,6 +236,7 @@ impl Audio {
             sound,
             position: 0.0,
             playing: true,
+            drawn: 0.0,
         });
         self.open_speakers();
     }
@@ -314,11 +318,16 @@ impl Audio {
             }
             Current::File(file) => {
                 let from = file.position;
+                file.drawn = from;
                 frame.sound = Some(SoundSpan {
                     from,
                     playing: file.playing,
                 });
-                values = gained(file.sound.tracks.at(from), gain);
+                // A stopped file reads 0; a playing one holds its value while the app
+                // is paused (dt is 0), so the frozen picture keeps its modulation.
+                if file.playing {
+                    values = gained(file.sound.tracks.at(from), gain);
+                }
                 if file.playing && dt > 0.0 {
                     let length = file.sound.seconds();
                     let mut to = from + dt;
@@ -500,14 +509,18 @@ impl Audio {
         }
     }
 
+    /// Where the speakers should be: where the last canvas frame was drawn (not where
+    /// the playhead moved on to), so the sound doesn't lead the picture by a frame.
+    fn speakers_at(&self) -> Option<f64> {
+        match &self.current {
+            Current::File(file) => Some(file.drawn),
+            _ => None,
+        }
+    }
+
     fn sync_speakers(&self) {
-        if let (Some(speakers), Current::File(file)) = (&self.speakers, &self.current) {
-            speakers.follow(
-                file.position,
-                self.speakers_playing(),
-                self.looping,
-                self.volume,
-            );
+        if let (Some(speakers), Some(at)) = (&self.speakers, self.speakers_at()) {
+            speakers.follow(at, self.speakers_playing(), self.looping, self.volume);
         }
     }
 
@@ -784,6 +797,56 @@ mod tests {
         assert!(audio.reanalysis.is_none(), "gain needs no re-run");
         let half = audio.frame(FRAME).signals;
         assert!((half.get(Signal::Level) - full.get(Signal::Level) / 2.0).abs() < 0.05);
+    }
+
+    #[test]
+    fn an_ended_file_reads_zero() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        audio.set_looping(false);
+        let (during, _) = run(&mut audio, 0.5);
+        assert!(during.get(Signal::Level) > 0.8, "{during:?}");
+        run(&mut audio, 1.0);
+        assert!(audio.ended());
+        let after = audio.frame(FRAME).signals;
+        assert_eq!(after.values[..4], [0.0; 4], "{after:?}");
+    }
+
+    #[test]
+    fn a_file_paused_with_its_own_button_reads_zero() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        run(&mut audio, 0.5);
+        audio.set_playing(false);
+        let paused = audio.frame(FRAME).signals;
+        assert_eq!(paused.values[..4], [0.0; 4], "{paused:?}");
+    }
+
+    #[test]
+    fn a_paused_app_holds_a_playing_file_s_value() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        let (playing, _) = run(&mut audio, 0.5);
+        let held = audio.frame(0.0).signals;
+        assert!(held.get(Signal::Level) > 0.8, "{held:?}");
+        assert!((held.get(Signal::Level) - playing.get(Signal::Level)).abs() < 0.05);
+    }
+
+    #[test]
+    fn the_speakers_follow_where_the_frame_was_drawn() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        let frame = audio.frame(FRAME);
+        assert_eq!(frame.sound.unwrap().from, 0.0);
+        assert_eq!(
+            audio.file().unwrap().position,
+            FRAME,
+            "the playhead moved on"
+        );
+        assert_eq!(
+            audio.speakers_at(),
+            Some(0.0),
+            "the speakers stay with the picture"
+        );
+        audio.frame(FRAME);
+        assert_eq!(audio.speakers_at(), Some(FRAME));
+        assert_eq!(Audio::new().speakers_at(), None);
     }
 
     #[test]
