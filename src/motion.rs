@@ -4,6 +4,7 @@
 use crate::blend::{Clocks, FrameParams, advance_ramp, blend};
 use crate::curve::CurveLibrary;
 use crate::params::Params;
+use crate::params::table::SliderId;
 use crate::rate::TICKS_PER_SECOND;
 use crate::save::saved_names;
 use crate::sequence::{SeqEvent, SeqView, Sequence};
@@ -71,6 +72,20 @@ pub struct Motion {
     frames: u32,
     /// The output jumped (a cut or a snapped cue) since the last `take_jump`.
     jumped: bool,
+    /// What audio adds to each linked slider this frame, in table order. Applied to
+    /// copies of the banks it blends; the banks themselves never change.
+    offsets: Vec<(SliderId, f32)>,
+}
+
+/// `p` with each offset added through the table's setter (held in range, rounded, tied
+/// values kept).
+fn shown(offsets: &[(SliderId, f32)], p: &Params) -> Params {
+    let mut p = *p;
+    for &(id, offset) in offsets {
+        let value = id.get(&p) + offset;
+        id.set(&mut p, value);
+    }
+    p
 }
 
 impl Motion {
@@ -86,6 +101,7 @@ impl Motion {
             preview_shown: None,
             frames: 0,
             jumped: false,
+            offsets: Vec::new(),
         }
     }
 
@@ -183,25 +199,41 @@ impl Motion {
         std::mem::take(&mut self.jumped)
     }
 
+    /// Sets what audio adds to each linked slider from the next frame on.
+    pub fn set_offsets(&mut self, offsets: Vec<(SliderId, f32)>) {
+        self.offsets = offsets;
+    }
+
+    /// What audio adds to each linked slider now.
+    pub fn offsets(&self) -> &[(SliderId, f32)] {
+        &self.offsets
+    }
+
     /// Advances ramps and phase clocks by `ticks` of animation time (see
     /// [`TICKS_PER_SECOND`]); the app passes one canvas frame period.
     pub fn advance(&mut self, ticks: i64) {
         let dt = (ticks as f64 / TICKS_PER_SECOND as f64) as f32;
         self.frames = self.frames.wrapping_add(1);
         match self.mode {
-            Mode::Live => self.rest.advance(&self.ab.banks[self.ab.on_air], dt),
+            Mode::Live => {
+                let on_air = shown(&self.offsets, &self.ab.banks[self.ab.on_air]);
+                self.rest.advance(&on_air, dt)
+            }
             Mode::Transition => {
-                let on_air = &self.ab.banks[self.ab.on_air];
+                let on_air = shown(&self.offsets, &self.ab.banks[self.ab.on_air]);
                 match self.ab.ramp() {
-                    Some(ramp) => advance_ramp(
-                        &mut self.rest,
-                        &mut self.target,
-                        on_air,
-                        &self.ab.banks[self.ab.off_air()],
-                        self.curves.eval(self.ab.curve, ramp.progress),
-                        dt,
-                    ),
-                    None => self.rest.advance(on_air, dt),
+                    Some(ramp) => {
+                        let off_air = shown(&self.offsets, &self.ab.banks[self.ab.off_air()]);
+                        advance_ramp(
+                            &mut self.rest,
+                            &mut self.target,
+                            &on_air,
+                            &off_air,
+                            self.curves.eval(self.ab.curve, ramp.progress),
+                            dt,
+                        )
+                    }
+                    None => self.rest.advance(&on_air, dt),
                 }
                 if self.ab.advance(dt) == Some(AbEvent::Finished) {
                     self.rest = self.target;
@@ -227,7 +259,7 @@ impl Motion {
                     }
                 }
                 match seq.view() {
-                    SeqView::Rest(p) => self.rest.advance(p, dt),
+                    SeqView::Rest(p) => self.rest.advance(&shown(&self.offsets, p), dt),
                     SeqView::Ramp {
                         from,
                         to,
@@ -236,8 +268,8 @@ impl Motion {
                     } => advance_ramp(
                         &mut self.rest,
                         &mut self.target,
-                        from,
-                        to,
+                        &shown(&self.offsets, from),
+                        &shown(&self.offsets, to),
                         self.curves.eval(curve, progress),
                         dt,
                     ),
@@ -252,7 +284,7 @@ impl Motion {
             self.preview_shown = source;
         }
         if let Some((_, p)) = preview {
-            self.preview.advance(&p, dt);
+            self.preview.advance(&shown(&self.offsets, &p), dt);
         }
     }
 
@@ -260,7 +292,8 @@ impl Motion {
     /// and the selected cue while a sequence runs.
     pub fn preview(&self) -> Option<Preview> {
         let (source, p) = self.preview_params()?;
-        let mut frame = blend(p, p, 0.0, None, &self.preview, &self.preview);
+        let p = shown(&self.offsets, p);
+        let mut frame = blend(&p, &p, 0.0, None, &self.preview, &self.preview);
         frame.warp.seed = self.frames;
         Some(Preview { source, frame })
     }
@@ -291,17 +324,29 @@ impl Motion {
     }
 
     fn blended(&self) -> FrameParams {
-        let rest = |p: &Params| blend(p, p, 0.0, None, &self.rest, &self.rest);
+        let offsets = &self.offsets;
+        let rest = |p: &Params| {
+            let p = shown(offsets, p);
+            blend(&p, &p, 0.0, None, &self.rest, &self.rest)
+        };
+        let ramp = |from: &Params, to: &Params, eased: f32, progress: f32| {
+            blend(
+                &shown(offsets, from),
+                &shown(offsets, to),
+                eased,
+                Some(progress),
+                &self.rest,
+                &self.target,
+            )
+        };
         match self.mode {
             Mode::Live => rest(&self.ab.banks[self.ab.on_air]),
             Mode::Transition => match self.ab.ramp() {
-                Some(ramp) => blend(
+                Some(r) => ramp(
                     &self.ab.banks[self.ab.on_air],
                     &self.ab.banks[self.ab.off_air()],
-                    self.curves.eval(self.ab.curve, ramp.progress),
-                    Some(ramp.progress),
-                    &self.rest,
-                    &self.target,
+                    self.curves.eval(self.ab.curve, r.progress),
+                    r.progress,
                 ),
                 None => rest(&self.ab.banks[self.ab.on_air]),
             },
@@ -311,14 +356,7 @@ impl Motion {
                     to,
                     progress,
                     curve,
-                }) => blend(
-                    from,
-                    to,
-                    self.curves.eval(curve, progress),
-                    Some(progress),
-                    &self.rest,
-                    &self.target,
-                ),
+                }) => ramp(from, to, self.curves.eval(curve, progress), progress),
                 Some(SeqView::Rest(p)) => rest(p),
                 None => rest(&self.ab.banks[self.ab.on_air]),
             },
@@ -666,5 +704,81 @@ mod tests {
         m.advance(secs(1.0)); // ramp to cue 2 starts at frame 24
         m.advance(secs(1.0)); // and ends at frame 48
         assert_eq!(m.frame().warp.zoom, 2.0);
+    }
+
+    #[test]
+    fn offsets_move_the_frame_but_not_the_bank() {
+        use crate::params::table::SliderId;
+        let mut motion = Motion::new(Params::default());
+        let base = motion.editable().warp.zoom;
+        motion.set_offsets(vec![(SliderId::Zoom, 0.5)]);
+        assert!((motion.frame().warp.zoom - (base + 0.5)).abs() < 1e-6);
+        assert_eq!(
+            motion.editable().warp.zoom,
+            base,
+            "the bank keeps the hand's value"
+        );
+        motion.set_offsets(Vec::new());
+        assert!((motion.frame().warp.zoom - base).abs() < 1e-6);
+    }
+
+    #[test]
+    fn offsets_are_held_in_range_and_rounded() {
+        use crate::params::table::SliderId;
+        let mut motion = Motion::new(Params::default());
+        motion.set_offsets(vec![(SliderId::Zoom, 1.0e6)]);
+        assert_eq!(motion.frame().warp.zoom, *SliderId::Zoom.range().end());
+        motion.set_offsets(vec![(SliderId::Levels, 1.4)]);
+        let levels = motion.editable().colorize.levels;
+        let mut shown = *motion.editable();
+        SliderId::Levels.set(&mut shown, levels as f32 + 1.4);
+        assert_eq!(
+            shown.colorize.levels,
+            levels + 1,
+            "rounded like a hand edit"
+        );
+    }
+
+    #[test]
+    fn a_modulated_speed_really_runs_faster() {
+        use crate::params::table::{OscSlider, SliderId};
+        let speed = SliderId::Osc(0, OscSlider::PhaseSpeed);
+        let amplitude = SliderId::Osc(0, OscSlider::Amplitude);
+        let mut still = Motion::new(Params::default());
+        let mut pushed = Motion::new(Params::default());
+        for motion in [&mut still, &mut pushed] {
+            speed.set(motion.editable(), 0.0);
+            amplitude.set(motion.editable(), 0.5); // a silent oscillator may be left out
+        }
+        pushed.set_offsets(vec![(speed, 1.0)]);
+        for _ in 0..10 {
+            still.advance(TICKS_PER_SECOND / 10);
+            pushed.advance(TICKS_PER_SECOND / 10);
+        }
+        let phase = |m: &Motion| {
+            m.frame()
+                .warp
+                .oscillators
+                .iter()
+                .find(|o| o.index == 0)
+                .expect("oscillator 1 is drawn")
+                .phase
+        };
+        assert_ne!(
+            phase(&still),
+            phase(&pushed),
+            "the phase clock advanced with the modulated speed"
+        );
+    }
+
+    #[test]
+    fn the_preview_is_modulated_too() {
+        use crate::params::table::SliderId;
+        let mut motion = Motion::new(Params::default());
+        motion.set_mode(Mode::Transition);
+        let base = motion.editable().warp.zoom; // the off-air bank in Transition
+        motion.set_offsets(vec![(SliderId::Zoom, 0.25)]);
+        let preview = motion.preview().expect("Transition shows the off-air bank");
+        assert!((preview.frame.warp.zoom - (base + 0.25)).abs() < 1e-6);
     }
 }
