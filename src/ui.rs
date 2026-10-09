@@ -146,6 +146,7 @@ pub fn draw(
         .show_collapsible(ui, &mut open, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Rasterwarp");
+                ui.small("Developed by Anthony C. Bartman (@rommix0)");
                 ui.label(format!(
                     "{} · display {:.0} Hz · {} late",
                     state.rate.label(),
