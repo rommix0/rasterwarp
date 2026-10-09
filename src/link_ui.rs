@@ -447,7 +447,12 @@ mod tests {
         // Open, an input section with no device list yet asks for one.
         let (open_height, open) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
         assert!(open.list_devices);
+        assert!(!open.refresh, "listing by itself never retries");
         assert!(open_height > closed_height);
+        // A file view without the output devices lists them too, and only that.
+        audio.kind = SourceKind::File;
+        let (_, file) = draw_audio_section(&mut audio, &mut Links::default(), &[]);
+        assert!(file.list_devices && !file.refresh);
     }
 
     #[test]
@@ -479,6 +484,7 @@ mod tests {
         assert!(actions.use_source.is_none() && actions.play.is_none());
         assert!(actions.seek.is_none() && actions.tap.is_none());
         assert!(!actions.choose_file && !actions.list_devices && !actions.restart);
+        assert!(!actions.refresh);
         assert_eq!(audio.shaping, crate::audio::Shaping::default());
         assert_eq!(links.audio.follow.len(), 1);
         assert_eq!(links.audio.beats.len(), 1);

@@ -197,13 +197,25 @@ impl Audio {
         }
     }
 
-    /// Tries the chosen device or file again (Refresh, or after a failure).
+    /// Tries the chosen device or file again (Refresh): reopens speakers that failed,
+    /// and opens the chosen device or loads the chosen file again unless that file is
+    /// loaded or still loading.
     pub fn retry(&mut self, budget: &Budget) {
-        let loaded_file = matches!(self.current, Current::File(_))
-            && matches!(self.choice, SourceChoice::File(_));
-        if !loaded_file {
+        if self.speakers_missing() {
+            self.open_speakers();
+        }
+        let file_chosen = matches!(self.choice, SourceChoice::File(_));
+        let loaded_file = file_chosen && matches!(self.current, Current::File(_));
+        let file_loading = file_chosen && self.loading.is_some();
+        if !loaded_file && !file_loading {
             self.use_choice(self.choice.clone(), budget);
         }
+    }
+
+    /// Whether a file is the source and should be playing on the speakers but has none
+    /// (they failed, or the device was missing).
+    fn speakers_missing(&self) -> bool {
+        self.speakers_on && self.speakers.is_none() && matches!(self.current, Current::File(_))
     }
 
     fn stop(&mut self) {
@@ -847,6 +859,51 @@ mod tests {
         audio.frame(FRAME);
         assert_eq!(audio.speakers_at(), Some(FRAME));
         assert_eq!(Audio::new().speakers_at(), None);
+    }
+
+    #[test]
+    fn retry_leaves_a_loading_file_alone() {
+        let budget = Budget::new(MEMORY_LIMIT);
+        let mut audio = Audio::new();
+        let path = PathBuf::from("no such folder/no such file.wav");
+        audio.use_choice(SourceChoice::File(path.clone()), &budget);
+        // A shaping change while it loads; a restarted load would take it up.
+        let moved = Shaping {
+            release: 1.0,
+            ..Shaping::default()
+        };
+        audio.set_shaping(moved);
+        audio.retry(&budget);
+        let pending = audio.loading.as_ref().expect("still loading");
+        assert_eq!(pending.loading.path, path);
+        assert_eq!(
+            pending.shaping,
+            Shaping::default(),
+            "the same load, not a new one"
+        );
+    }
+
+    #[test]
+    fn retry_leaves_a_loaded_file_playing_where_it_is() {
+        let budget = Budget::new(MEMORY_LIMIT);
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        audio.choice = SourceChoice::File(PathBuf::from("test.wav"));
+        run(&mut audio, 0.5);
+        let before = audio.file().unwrap();
+        audio.retry(&budget);
+        assert_eq!(audio.file().unwrap(), before);
+        assert!(audio.loading.is_none());
+    }
+
+    #[test]
+    fn missing_speakers_are_reopened_only_when_wanted() {
+        let mut audio = with_sound(tone_then_rest(1.0, 0.0));
+        assert!(!audio.speakers_missing(), "speakers disabled (as in tests)");
+        // As if enabled and then failed; nothing here opens a stream.
+        audio.speakers_on = true;
+        assert!(audio.speakers_missing(), "a file wants speakers it lacks");
+        audio.current = Current::None;
+        assert!(!audio.speakers_missing(), "no file, no speakers needed");
     }
 
     #[test]

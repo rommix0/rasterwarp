@@ -124,8 +124,10 @@ pub struct AudioActions {
     pub use_source: Option<SourceChoice>,
     /// Ask for a sound file to open.
     pub choose_file: bool,
-    /// List the input and output devices again.
+    /// List the input and output devices (a view needs them; nothing is retried).
     pub list_devices: bool,
+    /// Refresh: list the devices again and retry the source and the speakers.
+    pub refresh: bool,
     /// Play (true) or pause (false) the file.
     pub play: Option<bool>,
     /// Start the file over.
@@ -227,7 +229,7 @@ fn device(ui: &mut Ui, audio: &mut AudioUi, actions: &mut AudioActions) {
                 }
             });
         if ui.button("Refresh").clicked() {
-            actions.list_devices = true;
+            actions.refresh = true;
         }
     });
     if devices.is_empty() {
@@ -277,23 +279,32 @@ fn file(ui: &mut Ui, audio: &mut AudioUi, actions: &mut AudioActions) {
     }
     ui.add(Slider::new(&mut audio.volume, 0.0..=1.0).text("volume"));
     let shown = if audio.output.is_empty() {
-        "System default"
+        "System default".to_string()
     } else {
-        audio.output.as_str()
+        audio.output.clone()
     };
-    ComboBox::from_label("output")
-        .selected_text(shown)
-        .show_ui(ui, |ui| {
-            let default = ui.selectable_label(audio.output.is_empty(), "System default");
-            if default.clicked() {
-                audio.output.clear();
-            }
-            for name in audio.outputs.iter().flatten() {
-                if ui.selectable_label(audio.output == *name, name).clicked() {
-                    audio.output = name.clone();
+    ui.horizontal(|ui| {
+        ComboBox::from_label("output")
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                let default = ui.selectable_label(audio.output.is_empty(), "System default");
+                if default.clicked() {
+                    audio.output.clear();
                 }
-            }
-        });
+                for name in audio.outputs.iter().flatten() {
+                    if ui.selectable_label(audio.output == *name, name).clicked() {
+                        audio.output = name.clone();
+                    }
+                }
+            });
+        if ui
+            .button("Refresh")
+            .on_hover_text("List the devices again and reopen the sound output")
+            .clicked()
+        {
+            actions.refresh = true;
+        }
+    });
     ui.checkbox(
         &mut audio.start_with_recording,
         "Start the sound with the recording",

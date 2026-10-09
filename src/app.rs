@@ -858,13 +858,16 @@ impl State {
             // The dialog blocks the app; that must not make canvas frames late.
             self.clock.reanchor(self.seconds());
         }
-        if actions.list_devices {
+        // A view listing the devices it needs only lists them; Refresh also retries.
+        if actions.list_devices || actions.refresh {
             self.audio.hold();
             let (inputs, outputs) = (input_devices(), output_devices());
             self.ui.audio.listing_error = inputs.as_ref().err().or(outputs.as_ref().err()).cloned();
             self.ui.audio.inputs = Some(inputs.unwrap_or_default());
             self.ui.audio.outputs = Some(outputs.unwrap_or_default());
-            self.audio.retry(&self.budget);
+            if actions.refresh {
+                self.audio.retry(&self.budget);
+            }
             self.clock.reanchor(self.seconds());
         }
         if let Some(playing) = actions.play {
