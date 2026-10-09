@@ -29,6 +29,7 @@ pub mod save;
 pub mod sequence;
 pub mod session;
 pub mod source;
+pub mod theme;
 pub mod transition;
 pub mod ui;
 pub mod video;

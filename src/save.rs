@@ -15,6 +15,7 @@ use serde_json::Value;
 use crate::capture::recorder::RecordSettings;
 use crate::control::Link;
 use crate::params::Params;
+use crate::theme::ThemeChoice;
 
 /// The file format version this build writes.
 pub const VERSION: u32 = 1;
@@ -200,6 +201,8 @@ pub struct Settings {
     pub presets_folder: PathBuf,
     pub capture: RecordSettings,
     pub show_preview: bool,
+    /// The panel's light or dark appearance.
+    pub theme: ThemeChoice,
     /// The MIDI links; they belong to the controller, so every project uses them.
     #[serde(with = "crate::control::saved_links")]
     pub midi: Vec<Link>,
@@ -211,6 +214,7 @@ impl Default for Settings {
             presets_folder: PathBuf::from("presets"),
             capture: RecordSettings::default(),
             show_preview: true,
+            theme: ThemeChoice::System,
             midi: Vec::new(),
         }
     }
@@ -403,6 +407,7 @@ mod tests {
         let mut settings = Settings {
             presets_folder: PathBuf::from(r"D:\looks"),
             show_preview: false,
+            theme: ThemeChoice::Light,
             ..Settings::default()
         };
         settings.capture.folder = PathBuf::from(r"D:\video");
@@ -434,6 +439,7 @@ mod tests {
         let settings = load_settings(&dir);
         assert!(!settings.show_preview);
         assert!(settings.midi.is_empty());
+        assert_eq!(settings.theme, ThemeChoice::System);
     }
 
     #[test]

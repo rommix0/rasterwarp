@@ -267,6 +267,7 @@ impl State {
         let mut ui = UiState {
             frame_ms: 16.7,
             show_preview: settings.show_preview,
+            theme: settings.theme,
             canvas: CanvasChoice::new(canvas::DEFAULT, max_texture_side),
             presets_folder: settings.presets_folder.clone(),
             ..Default::default()
@@ -475,6 +476,7 @@ impl State {
             presets_folder: self.ui.presets_folder.clone(),
             capture: self.ui.capture.settings.clone(),
             show_preview: self.ui.show_preview,
+            theme: self.ui.theme,
             midi: self.ui.midi.links.list.clone(),
         }
     }
@@ -1536,6 +1538,7 @@ impl State {
         self.ui.files.unsaved = self.unsaved(&self.project());
         let raw_input = self.egui_state.take_egui_input(&self.window);
         let mut actions = UiActions::default();
+        self.egui_ctx.set_theme(self.ui.theme.preference());
         let mut egui_output = self.egui_ctx.run_ui(raw_input, |ui| {
             actions = ui::draw(ui, &mut self.motion, &mut self.ui, overlay.as_ref())
         });

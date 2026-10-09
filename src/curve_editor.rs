@@ -1,7 +1,7 @@
 //! Interactive editor for a user curve: drag points, double-click to add,
 //! right-click to remove.
 
-use egui::{Color32, Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2};
+use egui::{Pos2, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2};
 
 use crate::curve::{CustomCurve, Y_RANGE};
 
@@ -102,7 +102,7 @@ pub fn curve_editor(ui: &mut Ui, curve: &mut CustomCurve) -> Response {
             to_screen(rect, [x, curve.eval(x)])
         })
         .collect();
-    painter.line(line, Stroke::new(2.0, Color32::from_rgb(255, 170, 60)));
+    painter.line(line, Stroke::new(2.0, crate::theme::curve(ui)));
     for p in curve.all_points() {
         painter.circle_filled(to_screen(rect, p), 4.0, visuals.strong_text_color());
     }

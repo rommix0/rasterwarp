@@ -1,6 +1,6 @@
 //! The panel's MIDI section: the devices, the links, and learning a new one.
 
-use egui::{CollapsingHeader, Color32, DragValue, Ui};
+use egui::{CollapsingHeader, DragValue, Ui};
 
 use crate::control::Links;
 
@@ -23,7 +23,7 @@ pub fn learning_line(ui: &mut Ui, links: &mut Links) {
     };
     ui.horizontal_wrapped(|ui| {
         ui.colored_label(
-            Color32::YELLOW,
+            crate::theme::note(ui),
             format!("Learning {}: move a wheel or press a key…", target.label()),
         );
         if ui.button("Cancel").on_hover_text("Esc").clicked() {
@@ -48,7 +48,7 @@ pub fn midi_section(ui: &mut Ui, midi: &mut MidiUi) -> bool {
             }
         });
         for (name, why) in &midi.failed {
-            ui.colored_label(Color32::LIGHT_RED, format!("{name}: {why}"));
+            ui.colored_label(crate::theme::error(ui), format!("{name}: {why}"));
         }
         learning_line(ui, &mut midi.links);
         if midi.links.list.is_empty() {

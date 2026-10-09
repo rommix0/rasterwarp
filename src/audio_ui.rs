@@ -150,7 +150,7 @@ pub fn audio_section(
     CollapsingHeader::new("Audio").show(ui, |ui| {
         source(ui, audio, actions);
         if let Some(error) = &audio.error {
-            ui.colored_label(Color32::LIGHT_RED, error);
+            ui.colored_label(crate::theme::error(ui), error);
         }
         ui.add(Slider::new(&mut audio.shaping.gain, GAIN).text("gain"));
         ui.add(
@@ -236,7 +236,7 @@ fn device(ui: &mut Ui, audio: &mut AudioUi, actions: &mut AudioActions) {
         ui.label("No devices");
     }
     if let Some(error) = &audio.listing_error {
-        ui.colored_label(Color32::LIGHT_RED, error);
+        ui.colored_label(crate::theme::error(ui), error);
     }
     if let Some(name) = picked {
         actions.use_source = Some(if input {
@@ -320,7 +320,11 @@ fn meter(ui: &mut Ui, audio: &AudioUi) {
     ui.horizontal(|ui| {
         for beat in Beat::ALL {
             let lit = audio.lit[beat.index()].is_some_and(|at| now.duration_since(at) < LIT);
-            let colour = if lit { Color32::YELLOW } else { Color32::GRAY };
+            let colour = if lit {
+                crate::theme::note(ui)
+            } else {
+                Color32::GRAY
+            };
             ui.colored_label(colour, format!("● {}", beat.label()));
         }
     });

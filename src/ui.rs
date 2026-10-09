@@ -23,6 +23,7 @@ use crate::params::{
 };
 use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
+use crate::theme::{self, ThemeChoice};
 use crate::transition::AbState;
 
 /// UI-only state that isn't a render parameter.
@@ -33,6 +34,8 @@ pub struct UiState {
     pub panel_hidden: bool,
     /// Show the off-air preview in Transition and Sequence modes.
     pub show_preview: bool,
+    /// The panel's light or dark appearance.
+    pub theme: ThemeChoice,
     /// Smoothed time between screen refreshes in milliseconds.
     pub frame_ms: f32,
     /// The program frame rate chosen in the panel.
@@ -159,6 +162,20 @@ fn title(ui: &mut Ui) {
     }
 }
 
+/// The Theme drop-down beside the title.
+fn theme_picker(ui: &mut Ui, theme: &mut ThemeChoice) {
+    ComboBox::from_id_salt("theme")
+        .selected_text(theme.label())
+        .width(70.0)
+        .show_ui(ui, |ui| {
+            for choice in ThemeChoice::ALL {
+                ui.selectable_value(theme, choice, choice.label());
+            }
+        })
+        .response
+        .on_hover_text("The panel's appearance; System follows Windows' app mode");
+}
+
 pub fn draw(
     ui: &mut Ui,
     motion: &mut Motion,
@@ -192,7 +209,12 @@ pub fn draw(
         .default_size(320.0)
         .show_collapsible(ui, &mut open, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                title(ui);
+                ui.horizontal(|ui| {
+                    title(ui);
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        theme_picker(ui, &mut state.theme);
+                    });
+                });
                 ui.small("Developed by Anthony C. Bartman (@rommix0)");
                 ui.label(format!(
                     "{} · display {:.0} Hz · {} late",
@@ -201,10 +223,10 @@ pub fn draw(
                     state.late
                 ));
                 if let Some(err) = &state.load_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    ui.colored_label(theme::error(ui), err);
                 }
                 if let Some(err) = &state.file_error {
-                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                    ui.colored_label(theme::error(ui), err);
                 }
                 if let Some(note) = &state.file_note {
                     ui.label(note);
@@ -353,7 +375,7 @@ fn capture_section(
                 if !alpha_ok {
                     let note = "HEVC can't carry alpha; choose ProRes 4444 or FFV1";
                     if settings.alpha {
-                        ui.colored_label(egui::Color32::YELLOW, note);
+                        ui.colored_label(theme::note(ui), note);
                     } else {
                         ui.small(note);
                     }
@@ -404,7 +426,7 @@ fn capture_section(
                         ui.label(format!("offline: {speed:.2}× realtime"));
                     } else if status.dropped > 0 {
                         ui.colored_label(
-                            egui::Color32::YELLOW,
+                            theme::note(ui),
                             "The encoder can't keep up, so frames are being dropped. Offline mode records every frame.",
                         );
                     }
@@ -421,7 +443,7 @@ fn capture_section(
                 ui.small(saved);
             }
             if let Some(err) = &capture.error {
-                ui.colored_label(egui::Color32::LIGHT_RED, err);
+                ui.colored_label(theme::error(ui), err);
             }
         });
 }
