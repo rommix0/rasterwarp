@@ -147,8 +147,15 @@ impl Motion {
         match mode {
             Mode::Transition => self.ab.sync_off_air(),
             Mode::Sequence => {
+                // Keep the frame on screen: start from it, or give the cues one that
+                // holds it (when they're full, the selected cue shows instead).
                 let on_air = self.ab.banks[self.ab.on_air];
-                self.sequence.get_or_insert_with(|| Sequence::new(on_air));
+                match &mut self.sequence {
+                    Some(seq) => {
+                        seq.hold(on_air);
+                    }
+                    None => self.sequence = Some(Sequence::new(on_air)),
+                }
             }
             Mode::Live => {}
         }
@@ -678,6 +685,32 @@ mod tests {
         m.set_mode(Mode::Sequence);
         m.editable().warp.zoom = 1.7;
         m.set_mode(Mode::Live);
+        assert_eq!(m.frame().warp.zoom, 1.7);
+    }
+
+    #[test]
+    fn entering_sequence_again_keeps_the_frame() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Sequence);
+        m.set_mode(Mode::Live);
+        m.editable().warp.zoom = 1.7;
+        m.set_mode(Mode::Sequence);
+        assert_eq!(m.frame().warp.zoom, 1.7);
+        assert_eq!(m.sequence_mut().cues().len(), 2, "the first cue is kept");
+    }
+
+    #[test]
+    fn entering_sequence_from_transition_keeps_the_on_air_frame() {
+        let mut m = Motion::new(Params::default());
+        m.set_mode(Mode::Sequence);
+        m.set_mode(Mode::Transition);
+        m.editable().warp.zoom = 1.7;
+        m.trigger();
+        for _ in 0..1000 {
+            m.advance(TICKS_PER_SECOND / 10);
+        }
+        assert_eq!(m.frame().warp.zoom, 1.7, "the ramp finished");
+        m.set_mode(Mode::Sequence);
         assert_eq!(m.frame().warp.zoom, 1.7);
     }
 

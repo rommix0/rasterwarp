@@ -144,12 +144,32 @@ impl Sequence {
     /// Appends a copy of the selected cue two seconds after the last one.
     /// Returns false when full or out of thumbwheel range.
     pub fn add_cue(&mut self) -> bool {
-        let last = self.cues[self.cues.len() - 1];
-        let start = last.start_frame + 48;
+        self.push_cue(self.cues[self.selected])
+    }
+
+    /// Stops on a cue holding `params`, so entering Sequence mode keeps the frame on
+    /// screen: selects a cue that already holds them, or appends one (as [`add_cue`]
+    /// would). Returns false, leaving the cues and selection alone, when it can't add one.
+    ///
+    /// [`add_cue`]: Self::add_cue
+    pub fn hold(&mut self, params: Params) -> bool {
+        if let Some(i) = self.cues.iter().position(|cue| cue.params == params) {
+            self.selected = i;
+            self.stop();
+            return true;
+        }
+        self.push_cue(Cue {
+            params,
+            ..self.cues[self.selected]
+        })
+    }
+
+    /// Appends `cue` two seconds after the last one and selects it.
+    fn push_cue(&mut self, mut cue: Cue) -> bool {
+        let start = self.cues[self.cues.len() - 1].start_frame + 48;
         if self.cues.len() >= MAX_CUES || start > MAX_FRAME {
             return false;
         }
-        let mut cue = self.cues[self.selected];
         cue.start_frame = start;
         self.cues.push(cue);
         self.selected = self.cues.len() - 1;
@@ -460,5 +480,49 @@ mod tests {
         let zooms: Vec<f32> = s.cues().iter().map(|c| c.params.warp.zoom).collect();
         assert_eq!(frames, vec![0, 72]);
         assert_eq!(zooms, vec![2.0, 3.0]);
+    }
+
+    /// Default parameters with `zoom`.
+    fn zoomed(zoom: f32) -> Params {
+        let mut p = Params::default();
+        p.warp.zoom = zoom;
+        p
+    }
+
+    #[test]
+    fn holding_new_params_appends_a_cue_that_shows_them() {
+        let mut s = three_cues();
+        s.selected = 0;
+        s.run();
+        assert!(s.hold(zoomed(1.5)));
+        assert!(!s.is_running());
+        assert_eq!(s.selected, 3);
+        assert_eq!(s.cues()[3].start_frame, 120);
+        assert_eq!(zoom_from(s.view()), (1.5, None));
+        let zooms: Vec<f32> = s.cues().iter().map(|c| c.params.warp.zoom).collect();
+        assert_eq!(
+            zooms,
+            vec![1.0, 2.0, 3.0, 1.5],
+            "the other cues are untouched"
+        );
+    }
+
+    #[test]
+    fn holding_params_a_cue_has_selects_it() {
+        let mut s = three_cues();
+        assert!(s.hold(zoomed(2.0)));
+        assert_eq!(s.selected, 1);
+        assert_eq!(s.cues().len(), 3);
+    }
+
+    #[test]
+    fn holding_with_no_room_leaves_the_cues() {
+        let mut s = three_cues();
+        s.add_cue();
+        s.add_cue();
+        s.selected = 1;
+        assert!(!s.hold(zoomed(1.5)));
+        assert_eq!(s.cues().len(), MAX_CUES);
+        assert_eq!(s.selected, 1);
     }
 }
