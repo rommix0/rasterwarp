@@ -1360,6 +1360,9 @@ impl State {
             self.choose_capture_folder();
         }
         self.input_actions(actions.inputs);
+        if actions.refresh_midi {
+            self.midi.rescan(Instant::now());
+        }
         if actions.stop_recording {
             self.stop_recording();
         }

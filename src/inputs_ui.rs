@@ -4,7 +4,7 @@
 
 use egui::{CollapsingHeader, ComboBox, Slider, Ui};
 
-use crate::control::Links;
+use crate::control::{Action, Links, Target};
 use crate::inputs::Kind;
 use crate::link_ui;
 use crate::params::table::{ChoiceId, SliderId, VideoSlider};
@@ -196,16 +196,20 @@ fn playback(
 ) {
     ui.separator();
     let key = loop_key(role).name();
+    let loop_action = Target::Action(match role {
+        Role::Source => Action::SourceLoop,
+        Role::Background => Action::BackgroundLoop,
+    });
     if let Some(seconds) = state.looping {
         ui.horizontal(|ui| {
             ui.label(format!("Looping {seconds:.1} s"));
-            if ui
+            let back = ui
                 .button("Back to live")
-                .on_hover_text(format!("Show the live camera again ({key})"))
-                .clicked()
-            {
+                .on_hover_text(format!("Show the live camera again ({key})"));
+            if back.clicked() {
                 actions.release_loop = Some(role);
             }
+            link_ui::link_menu(&back, links, loop_action);
             if ui
                 .button("Loop again")
                 .on_hover_text("Loop the latest frames instead")
@@ -250,7 +254,7 @@ fn playback(
             |s| s,
         );
         let length = state.loop_length;
-        if ui
+        let grab = ui
             .add_enabled(
                 length > 0.0,
                 egui::Button::new(format!("Loop last {length:.1} s")),
@@ -258,11 +262,11 @@ fn playback(
             .on_hover_text(format!(
                 "Play the last {length:.1} s over and over, carrying on from what's on \
                  screen ({key})"
-            ))
-            .clicked()
-        {
+            ));
+        if grab.clicked() {
             actions.grab_loop = Some(role);
         }
+        link_ui::link_menu(&grab, links, loop_action);
         if length <= 0.0 {
             ui.small("Set a delay to choose the loop length.");
         }

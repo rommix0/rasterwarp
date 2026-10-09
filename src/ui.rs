@@ -8,13 +8,13 @@ use crate::canvas::{CanvasChoice, PRESETS};
 use crate::capture::CaptureMode;
 use crate::capture::encode::VideoFormat;
 use crate::capture::recorder::{RecordSettings, RecordStatus};
-use crate::control::Links;
+use crate::control::{Action, Links, Target};
 use crate::curve::{CurveLibrary, CurveRef};
 use crate::curve_editor::curve_editor;
 use crate::files_ui::{self, FileActions, FilesUi};
 use crate::inputs_ui::{self, InputActions, InputUi};
 use crate::link_ui;
-use crate::midi_ui::MidiUi;
+use crate::midi_ui::{self, MidiUi};
 use crate::motion::{Mode, Motion};
 use crate::params::table::{ChoiceId, OscSlider, SliderId};
 use crate::params::{
@@ -93,6 +93,8 @@ pub struct UiActions {
     pub choose_folder: bool,
     pub files: FileActions,
     pub inputs: InputActions,
+    /// Look for MIDI devices again.
+    pub refresh_midi: bool,
     /// The part of the window left for the canvas, in points (beside the panel).
     pub canvas_rect: Option<egui::Rect>,
 }
@@ -124,6 +126,9 @@ pub fn draw(
             actions.inputs.toggle_loop = Some(role);
         }
     }
+    if state.midi.links.learning().is_some() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.midi.links.cancel();
+    }
     if !ui.ctx().egui_wants_keyboard_input() && ui.input_mut(|i| i.consume_shortcut(&TOGGLE_PANEL))
     {
         state.panel_hidden = !state.panel_hidden;
@@ -154,9 +159,15 @@ pub fn draw(
                 if let Some(note) = &state.session_note {
                     ui.label(note);
                 }
+                midi_ui::learning_line(ui, &mut state.midi.links);
                 ui.label("Drop an image, video, preset or project onto the window.");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut state.paused, "Pause");
+                    let pause = ui.checkbox(&mut state.paused, "Pause");
+                    link_ui::link_menu(
+                        &pause,
+                        &mut state.midi.links,
+                        Target::Action(Action::Pause),
+                    );
                     ui.checkbox(&mut state.show_preview, "Show preview");
                     if ui.button("Reset all").clicked() {
                         *motion.editable() = Params::default();
@@ -172,10 +183,11 @@ pub fn draw(
                 });
                 let recording = state.capture.status.is_some();
                 files_ui::project_row(ui, &state.files, recording, &mut actions.files);
-                capture_section(ui, &mut state.capture, &mut actions);
+                capture_section(ui, &mut state.capture, &mut state.midi.links, &mut actions);
                 rate_section(ui, &mut state.rate, recording);
                 canvas_section(ui, &mut state.canvas, recording, &mut actions);
-                mode_section(ui, motion);
+                actions.refresh_midi = midi_ui::midi_section(ui, &mut state.midi);
+                mode_section(ui, motion, &mut state.midi.links);
                 for role in Role::ALL {
                     inputs_ui::input_section(
                         ui,
@@ -247,7 +259,12 @@ fn preview_overlay(ctx: &egui::Context, preview: &PreviewOverlay) {
         });
 }
 
-fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions) {
+fn capture_section(
+    ui: &mut Ui,
+    capture: &mut CaptureUi,
+    links: &mut Links,
+    actions: &mut UiActions,
+) {
     CollapsingHeader::new("Capture")
         .default_open(true)
         .show(ui, |ui| {
@@ -304,14 +321,18 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions
             });
             match &capture.status {
                 None => {
-                    if ui.button("Record").clicked() {
+                    let record = ui.button("Record");
+                    if record.clicked() {
                         actions.start_recording = true;
                     }
+                    link_ui::link_menu(&record, links, Target::Action(Action::Record));
                 }
                 Some(status) => {
-                    if ui.button("Stop recording").clicked() {
+                    let stop = ui.button("Stop recording");
+                    if stop.clicked() {
                         actions.stop_recording = true;
                     }
+                    link_ui::link_menu(&stop, links, Target::Action(Action::Record));
                     ui.label(format!(
                         "{:.1} s · {} frames · {} dropped",
                         status.seconds, status.frames, status.dropped
@@ -326,13 +347,13 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions
                     }
                 }
             }
-            if ui
+            let still = ui
                 .button("Save still")
-                .on_hover_text("Save the canvas as a PNG in the captures folder (F12)")
-                .clicked()
-            {
+                .on_hover_text("Save the canvas as a PNG in the captures folder (F12)");
+            if still.clicked() {
                 actions.save_still = true;
             }
+            link_ui::link_menu(&still, links, Target::Action(Action::SaveStill));
             if let Some(saved) = &capture.saved {
                 ui.small(saved);
             }
@@ -403,29 +424,28 @@ fn canvas_section(
     });
 }
 
-fn mode_section(ui: &mut Ui, motion: &mut Motion) {
+fn mode_section(ui: &mut Ui, motion: &mut Motion, links: &mut Links) {
     ui.separator();
     ui.horizontal(|ui| {
         for mode in Mode::ALL {
-            if ui
-                .selectable_label(motion.mode() == mode, format!("{mode:?}"))
-                .clicked()
-            {
+            let label = ui.selectable_label(motion.mode() == mode, format!("{mode:?}"));
+            if label.clicked() {
                 motion.set_mode(mode);
             }
+            link_ui::link_menu(&label, links, Target::Mode(mode));
         }
     });
     match motion.mode() {
         Mode::Live => {
             ui.label("Editing what's on screen.");
         }
-        Mode::Transition => transition_controls(ui, motion),
-        Mode::Sequence => sequence_controls(ui, motion),
+        Mode::Transition => transition_controls(ui, motion, links),
+        Mode::Sequence => sequence_controls(ui, motion, links),
     }
     ui.separator();
 }
 
-fn transition_controls(ui: &mut Ui, motion: &mut Motion) {
+fn transition_controls(ui: &mut Ui, motion: &mut Motion, links: &mut Links) {
     let ab = &motion.ab;
     ui.label(format!(
         "On air: {} · editing: {}",
@@ -438,37 +458,51 @@ fn transition_controls(ui: &mut Ui, motion: &mut Motion) {
         None => "Transition (Space)",
     };
     ui.horizontal(|ui| {
-        if ui.button(label).clicked() {
+        let transition = ui.button(label);
+        if transition.clicked() {
             motion.trigger();
         }
-        if ui.button("Cut").clicked() {
+        link_ui::link_menu(&transition, links, Target::Action(Action::Transition));
+        let cut = ui.button("Cut");
+        if cut.clicked() {
             motion.cut();
         }
+        link_ui::link_menu(&cut, links, Target::Action(Action::Cut));
     });
     let progress = motion.ab.ramp().map_or(0.0, |r| r.progress);
     ui.add(ProgressBar::new(progress).show_percentage());
-    ui.add(
+    let duration = ui.add(
         Slider::new(&mut motion.ab.duration, DURATION)
             .text("duration (s)")
             .logarithmic(true),
     );
+    link_ui::link_menu(&duration, links, Target::Duration);
     curve_picker(ui, "ab curve", &motion.curves, &mut motion.ab.curve);
 }
 
-fn sequence_controls(ui: &mut Ui, motion: &mut Motion) {
+fn sequence_controls(ui: &mut Ui, motion: &mut Motion, links: &mut Links) {
     let curves = motion.curves.clone();
     let seq = motion.sequence_mut();
     ui.horizontal(|ui| {
-        if seq.is_running() {
-            if ui.button("Stop").clicked() {
+        let run = if seq.is_running() {
+            let stop = ui.button("Stop");
+            if stop.clicked() {
                 seq.stop();
             }
-        } else if ui.button("Run").clicked() {
-            seq.run();
-        }
-        if ui.button("Reset").clicked() {
+            stop
+        } else {
+            let run = ui.button("Run");
+            if run.clicked() {
+                seq.run();
+            }
+            run
+        };
+        link_ui::link_menu(&run, links, Target::Action(Action::SequenceRun));
+        let reset = ui.button("Reset");
+        if reset.clicked() {
             seq.reset();
         }
+        link_ui::link_menu(&reset, links, Target::Action(Action::SequenceReset));
         ui.checkbox(&mut seq.looping, "Loop");
     });
     let frame = seq.clock_frames();
@@ -736,9 +770,11 @@ fn feedback_section(ui: &mut Ui, params: &mut Params, links: &mut Links, actions
             ] {
                 link_ui::slider(ui, links, params, id, text);
             }
-            if ui.button("Clear trails").clicked() {
+            let clear = ui.button("Clear trails");
+            if clear.clicked() {
                 actions.clear_feedback = true;
             }
+            link_ui::link_menu(&clear, links, Target::Action(Action::ClearTrails));
         });
 }
 
