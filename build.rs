@@ -1,12 +1,15 @@
-//! Copies the FFmpeg DLLs that capture links against next to the built executables, so
+//! Copies the FFmpeg DLLs that capture, clips and cameras link against (and the ones those
+//! load in turn, such as avdevice's avfilter) next to the built executables, so
 //! `cargo run`, `cargo test` and the exe in `target/<profile>/` all find them at startup.
 //! Without them Windows exits the program with 0xC0000135 and no message.
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-const DLLS: [&str; 5] = [
+const DLLS: [&str; 7] = [
     "avcodec-63.dll",
+    "avdevice-63.dll",
+    "avfilter-12.dll",
     "avformat-63.dll",
     "avutil-61.dll",
     "swscale-10.dll",
