@@ -1,7 +1,8 @@
 //! Copies the FFmpeg DLLs that capture, clips and cameras link against (and the ones those
 //! load in turn, such as avdevice's avfilter) next to the built executables, so
 //! `cargo run`, `cargo test` and the exe in `target/<profile>/` all find them at startup.
-//! Without them Windows exits the program with 0xC0000135 and no message.
+//! Without them Windows exits the program with 0xC0000135 and no message. Also links
+//! `rasterwarp.rc` (the icon) into the app.
 
 use std::path::{Path, PathBuf};
 use std::{env, fs};
@@ -19,9 +20,15 @@ const DLLS: [&str; 7] = [
 fn main() {
     println!("cargo:rerun-if-env-changed=FFMPEG_DIR");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=rasterwarp.rc");
+    println!("cargo:rerun-if-changed=icon/rasterwarp.ico");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
+    // The icon (rasterwarp.rc) goes into the app only, not the test binaries.
+    embed_resource::compile_for("rasterwarp.rc", ["rasterwarp"], embed_resource::NONE)
+        .manifest_optional()
+        .expect("compile rasterwarp.rc");
     let Ok(ffmpeg_dir) = env::var("FFMPEG_DIR") else {
         panic!("FFMPEG_DIR is not set; see .cargo/config.toml");
     };

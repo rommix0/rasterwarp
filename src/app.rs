@@ -13,7 +13,7 @@ use winit::dpi::{LogicalSize, PhysicalSize};
 use winit::event::{ElementState, WindowEvent};
 use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
+use winit::window::{Window, WindowAttributes, WindowId};
 
 use crate::audio::input::{input_devices, output_devices};
 use crate::audio::{Audio, Beat, SourceChoice};
@@ -180,15 +180,37 @@ struct State {
     settings_written: Settings,
 }
 
+/// The window with the app's icon (icon 1 in `rasterwarp.rc`) in its title bar, the
+/// taskbar and Alt-Tab. Without it (or if it won't load) Windows shows a generic one.
+#[cfg(windows)]
+fn with_icon(attributes: WindowAttributes) -> WindowAttributes {
+    use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+    use winit::window::Icon;
+    match Icon::from_resource(1, None) {
+        Ok(icon) => attributes
+            .with_window_icon(Some(icon.clone()))
+            .with_taskbar_icon(Some(icon)),
+        Err(err) => {
+            log::warn!("no window icon: {err}");
+            attributes
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn with_icon(attributes: WindowAttributes) -> WindowAttributes {
+    attributes
+}
+
 impl State {
     fn new(event_loop: &ActiveEventLoop, initial_image: Option<&Path>) -> Result<Self> {
         let window = Arc::new(
             event_loop
-                .create_window(
+                .create_window(with_icon(
                     Window::default_attributes()
                         .with_title("Rasterwarp")
                         .with_inner_size(LogicalSize::new(1280.0, 720.0)),
-                )
+                ))
                 .context("failed to create window")?,
         );
         let backends = gpu::backends_from_env()?;

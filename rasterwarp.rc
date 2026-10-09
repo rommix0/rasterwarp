@@ -1,0 +1,5 @@
+// Windows resources for rasterwarp.exe, compiled and linked by build.rs.
+
+// The executable's icon (the lowest ID is what Explorer shows); the app also loads it
+// by this ID for the window and taskbar.
+1 ICON "icon/rasterwarp.ico"

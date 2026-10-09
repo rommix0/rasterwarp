@@ -5,5 +5,7 @@
 /manuals/
 /captures/
 /xtras/
-/icon/
+/icon/*
+!/icon/rasterwarp.ico
 /EFFECTS_HANDOFF.md
+/dist/
