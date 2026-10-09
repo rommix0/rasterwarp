@@ -1108,6 +1108,7 @@ impl State {
                 renderer,
                 View::Main,
                 video,
+                self.time,
                 paused,
             );
         }
@@ -1138,6 +1139,7 @@ impl State {
                         self.preview.renderer_mut(),
                         View::Preview,
                         video,
+                        self.time,
                         paused,
                     );
                 }

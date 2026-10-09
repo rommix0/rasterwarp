@@ -9,7 +9,7 @@ use crate::gpu::{FullscreenPass, PassDesc, RenderTarget};
 use crate::params::{Between, Slit};
 use crate::source::GrayImage;
 use crate::video::Pixels;
-use crate::video::playhead::{Sample, layer};
+use crate::video::playhead::{SLIT_STEPS, Sample, layer};
 
 /// Matches `struct Frames` in frames.wgsl.
 #[repr(C)]
@@ -17,6 +17,7 @@ use crate::video::playhead::{Sample, layer};
 pub struct FramesUniforms {
     pub playhead: [f32; 4],
     pub ring: [u32; 4],
+    pub behind: [[f32; 4]; SLIT_STEPS / 4],
 }
 
 /// The texture format frames of `pixels` are stored and drawn in. Color frames are sRGB,
@@ -40,11 +41,12 @@ pub fn uniforms(sample: &Sample, layers: u32) -> FramesUniforms {
     FramesUniforms {
         playhead: [
             (sample.base - sample.first as f64) as f32,
-            sample.reach as f32,
+            0.0,
             (sample.last - sample.first) as f32,
             0.0,
         ],
         ring: [layer(sample.first, layers), layers, slit, flags],
+        behind: std::array::from_fn(|i| std::array::from_fn(|j| sample.behind[4 * i + j])),
     }
 }
 
@@ -251,11 +253,12 @@ impl FramesPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::video::playhead::straight_behind;
 
     fn sample() -> Sample {
         Sample {
             base: 102.25,
-            reach: 7.5,
+            behind: straight_behind(7.5),
             first: 94,
             last: 103,
             between: Between::Blend,
@@ -267,7 +270,9 @@ mod tests {
     #[test]
     fn uniforms_count_from_the_window_start() {
         let u = uniforms(&sample(), 16);
-        assert_eq!(u.playhead, [8.25, 7.5, 9.0, 0.0]);
+        assert_eq!(u.playhead, [8.25, 0.0, 9.0, 0.0]);
+        assert_eq!(u.behind[0][0], 0.0);
+        assert_eq!(u.behind[15][3], 7.5, "the full depth");
         assert_eq!(u.ring, [94 % 16, 16, 2, 0b11]);
         let nearest = Sample {
             between: Between::Nearest,

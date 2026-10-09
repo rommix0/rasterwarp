@@ -16,7 +16,7 @@ use rasterwarp::preview::PreviewView;
 use rasterwarp::rate::FrameRate;
 use rasterwarp::source::{ColorImage, GrayImage, test_card};
 use rasterwarp::video::Pixels;
-use rasterwarp::video::playhead::Sample;
+use rasterwarp::video::playhead::{SLIT_STEPS, Sample, straight_behind};
 
 const OUT_W: u32 = 320;
 const OUT_H: u32 = 180;
@@ -896,7 +896,7 @@ fn draw_frames(
 fn still_sample(base: f64, between: Between) -> Sample {
     Sample {
         base,
-        reach: 0.0,
+        behind: [0.0; SLIT_STEPS],
         first: base.floor() as i64,
         last: base.floor() as i64 + 1,
         between,
@@ -938,7 +938,7 @@ fn slit_scan_rows_show_older_frames_further_down() {
     let frames = flat_frames(&[0, 30, 60, 90, 120, 150, 180, 210], size);
     let sample = Sample {
         base: 7.0,
-        reach: 7.0,
+        behind: straight_behind(7.0),
         first: 0,
         last: 8,
         between: Between::Blend,
@@ -973,6 +973,40 @@ fn slit_scan_rows_show_older_frames_further_down() {
 }
 
 #[test]
+fn slit_scan_rows_follow_a_table_that_reaches_ahead() {
+    let Some((device, queue)) = device() else {
+        return;
+    };
+    let size = (4, 16);
+    let frames = flat_frames(&[0, 30, 60, 90, 120, 150, 180, 210], size);
+    // A clip that played backwards to frame 3 and turned: halfway down the picture, the
+    // playhead was 3 frames ahead; at the top and bottom it was where it is now.
+    let last = (SLIT_STEPS - 1) as f32;
+    let sample = Sample {
+        base: 3.0,
+        behind: std::array::from_fn(|i| -3.0 * (1.0 - (2.0 * i as f32 / last - 1.0).abs())),
+        first: 3,
+        last: 7,
+        between: Between::Blend,
+        slit: Slit::Rows,
+        flip: false,
+    };
+    let pixels = draw_frames(&device, &queue, &frames, size, &sample, None);
+    let row = |y: u32| pixels[(y * size.0) as usize];
+    assert!(row(0).abs_diff(90) <= 12, "top: about frame 3, {}", row(0));
+    assert!(
+        row(8).abs_diff(180) <= 12,
+        "middle: about frame 6, {}",
+        row(8)
+    );
+    assert!(
+        row(15).abs_diff(90) <= 12,
+        "bottom: about frame 3, {}",
+        row(15)
+    );
+}
+
+#[test]
 fn slit_scan_follows_the_map_image() {
     let Some((device, queue)) = device() else {
         return;
@@ -987,7 +1021,7 @@ fn slit_scan_follows_the_map_image() {
     };
     let sample = Sample {
         base: 6.0,
-        reach: 4.0,
+        behind: straight_behind(4.0),
         first: 2,
         last: 7,
         between: Between::Nearest,

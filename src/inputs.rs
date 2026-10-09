@@ -7,13 +7,15 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 
 use crate::blend::VideoFrame;
-use crate::params::{PlayMode, Role, Slit};
+use crate::params::{PlayMode, Role, Slit, ranges};
 use crate::passes::Renderer;
 use crate::session::CameraChoice;
 use crate::source::GrayImage;
 use crate::video::camera::{Camera, Status};
 use crate::video::clip::{Clip, Loading};
-use crate::video::playhead::{self, Playback, camera_sample, clip_frame, clip_sample, max_layers};
+use crate::video::playhead::{
+    self, Playback, Trail, camera_sample, clip_frame, clip_sample, max_layers,
+};
 use crate::video::{Budget, Format, Pixels};
 
 /// What an input can be.
@@ -76,6 +78,8 @@ pub struct Input {
     loading: Option<Loading>,
     /// Each view's clip playback.
     playback: [Playback; 2],
+    /// Where each view's clip playhead has been, for slit-scan.
+    trails: [Trail; 2],
     /// The play mode each view's frame ring was filled for.
     modes: [Option<PlayMode>; 2],
     /// The format the renderers' frames passes were made for.
@@ -121,6 +125,7 @@ impl Input {
             content: Content::Still,
             loading: None,
             playback: [Playback::default(); 2],
+            trails: Default::default(),
             modes: [None; 2],
             format: None,
             map: None,
@@ -246,6 +251,7 @@ impl Input {
         self.format = Some(format);
         self.held = None;
         self.playback = [Playback::default(); 2];
+        self.trails = Default::default();
         self.modes = [None; 2];
     }
 
@@ -289,11 +295,14 @@ impl Input {
     /// The preview starts showing something new: its clips continue from where the
     /// canvas shows them, as its clocks do.
     pub fn sync_preview(&mut self) {
-        self.playback[View::Preview.index()] = self.playback[View::Main.index()];
+        let (main, preview) = (View::Main.index(), View::Preview.index());
+        self.playback[preview] = self.playback[main];
+        self.trails[preview] = self.trails[main].clone();
     }
 
     /// Draws this canvas frame's picture into `renderer` (the canvas's or the
-    /// preview's) for playback settings `v`. A paused camera holds its picture.
+    /// preview's) for playback settings `v` at animation time `time` (seconds, standing
+    /// still while paused). A paused camera holds its picture.
     #[allow(clippy::too_many_arguments)]
     pub fn feed(
         &mut self,
@@ -303,6 +312,7 @@ impl Input {
         renderer: &mut Renderer,
         view: View,
         v: &VideoFrame,
+        time: f64,
         paused: bool,
     ) {
         let Some(format) = self.format else {
@@ -323,7 +333,9 @@ impl Input {
                 }
                 let count = clip.count();
                 let index = self.playback[i].index(v, count, clip.fps);
-                let sample = clip_sample(v, index, count, clip.fps, pass.max_layers());
+                let trail = &mut self.trails[i];
+                trail.record(time, index, f64::from(*ranges::SLIT_DEPTH.end()));
+                let sample = clip_sample(v, index, trail, count, clip.fps, pass.max_layers());
                 for k in pass.missing(device, &sample) {
                     let frame = &clip.frames[clip_frame(v.mode, k, count) as usize];
                     pass.upload(queue, k, if small { &frame.small } else { &frame.full });

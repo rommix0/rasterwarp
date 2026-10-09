@@ -6,6 +6,11 @@
 //! is found by wrapping or folding it), so the frames around the playhead are always a
 //! contiguous run, even across a loop point. A camera's virtual index is its frame
 //! number.
+//!
+//! Slit-scan on a playing clip shows where the playhead actually was: each depth looks up
+//! the clip's [`Trail`], so slowing down, stopping and reversing all stay continuous.
+
+use std::collections::VecDeque;
 
 use crate::blend::VideoFrame;
 use crate::params::{Between, PlayMode, Slit};
@@ -20,14 +25,18 @@ pub const VRAM_BUDGET: u64 = 1 << 30;
 /// A camera's frame rate when it can't be measured yet.
 pub const FALLBACK_FPS: f64 = 30.0;
 
+/// Steps in a sample's slit-scan table, from map 0 (now) to map 1 (the full depth).
+pub const SLIT_STEPS: usize = 64;
+
 /// What the frames pass draws for one input this frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sample {
     /// The playhead, as a fractional virtual index.
     pub base: f64,
-    /// How many frames behind `base` the far end of the slit-scan map lies; negative
-    /// when a clip plays backwards (behind is then ahead). 0 without slit-scan.
-    pub reach: f64,
+    /// How many frames behind `base` each slit-scan map value shows, at map values
+    /// `i / (SLIT_STEPS - 1)`; negative where it lies ahead (a clip that was playing
+    /// backwards). All 0 without slit-scan.
+    pub behind: [f32; SLIT_STEPS],
     /// The virtual indices any pixel may show, which must be on the GPU.
     pub first: i64,
     pub last: i64,
@@ -42,6 +51,62 @@ impl Sample {
     pub fn window(&self) -> std::ops::RangeInclusive<i64> {
         self.first..=self.last
     }
+}
+
+/// A slit-scan table reaching evenly back to `reach` frames behind the playhead.
+pub fn straight_behind(reach: f64) -> [f32; SLIT_STEPS] {
+    std::array::from_fn(|i| (reach * i as f64 / (SLIT_STEPS - 1) as f64) as f32)
+}
+
+/// Where a clip's playhead has been, for slit-scan: its virtual index at moments of
+/// animation time, which stands still while paused.
+#[derive(Clone, Debug, Default)]
+pub struct Trail {
+    /// (time, index), oldest first, with times rising.
+    points: VecDeque<(f64, f64)>,
+}
+
+impl Trail {
+    /// Notes that the playhead is at `index` at `time`, keeping `keep` seconds of history.
+    pub fn record(&mut self, time: f64, index: f64, keep: f64) {
+        match self.points.back_mut() {
+            // Paused: the moment hasn't moved on.
+            Some(last) if time <= last.0 => last.1 = index,
+            _ => self.points.push_back((time, index)),
+        }
+        // Keeps one point at or before the horizon, to look up the moment there.
+        while self.points.len() > 2 && self.points[1].0 <= time - keep {
+            self.points.pop_front();
+        }
+    }
+
+    /// The fractional index the playhead was on `ago` seconds before the latest point;
+    /// the oldest one before the history starts. None before anything is recorded.
+    pub fn at(&self, ago: f64) -> Option<f64> {
+        let &(now, newest) = self.points.back()?;
+        let time = now - ago.max(0.0);
+        let after = self.points.partition_point(|&(t, _)| t <= time);
+        if after == self.points.len() {
+            return Some(newest);
+        }
+        if after == 0 {
+            return Some(self.points[0].1);
+        }
+        let ((t0, a), (t1, b)) = (self.points[after - 1], self.points[after]);
+        Some(a + (b - a) * (time - t0) / (t1 - t0))
+    }
+}
+
+/// The table for a playhead at `index` whose history is `trail`, reaching back `depth`
+/// seconds, held so its frames span at most `span` frames around the playhead.
+fn trail_behind(trail: &Trail, index: f64, depth: f64, span: f64) -> [f32; SLIT_STEPS] {
+    let (mut lo, mut hi) = (index, index);
+    std::array::from_fn(|i| {
+        let ago = depth * i as f64 / (SLIT_STEPS - 1) as f64;
+        let then = trail.at(ago).unwrap_or(index).clamp(hi - span, lo + span);
+        (lo, hi) = (lo.min(then), hi.max(then));
+        (index - then) as f32
+    })
 }
 
 /// A clip's playback state between frames: where its virtual index starts, and the frame
@@ -120,25 +185,40 @@ fn reach_frames(v: &VideoFrame, fps: f64, layers: u32) -> f64 {
     (f64::from(v.slit_depth.max(0.0)) * fps).min(f64::from(layers.saturating_sub(2)))
 }
 
-/// What a clip shows this frame. `index` is the playhead from [`Playback::index`];
-/// `layers` is the most layers its ring may have.
-pub fn clip_sample(v: &VideoFrame, index: f64, count: u32, fps: f64, layers: u32) -> Sample {
+/// What a clip shows this frame. `index` is the playhead from [`Playback::index`], and
+/// `trail` where it has been (see [`Trail::record`]); `layers` is the most layers its
+/// ring may have.
+pub fn clip_sample(
+    v: &VideoFrame,
+    index: f64,
+    trail: &Trail,
+    count: u32,
+    fps: f64,
+    layers: u32,
+) -> Sample {
     let depth = reach_frames(v, fps, layers);
-    let (reach, first, last) = if v.mode == PlayMode::Scrub {
+    let (behind, first, last) = if v.mode == PlayMode::Scrub {
         // Behind is towards the first frame, which holds.
         let last_frame = i64::from(count.saturating_sub(1));
         let first = ((index - depth).floor() as i64).max(0);
         let last = (index.floor() as i64 + 1).min(last_frame);
-        (depth, first, last.max(first))
+        (straight_behind(depth), first, last.max(first))
     } else {
-        // Behind is the way the playhead came.
-        let reach = if v.speed < 0.0 { -depth } else { depth };
-        let (lo, hi) = (index.min(index - reach), index.max(index - reach));
-        (reach, lo.floor() as i64, hi.floor() as i64 + 1)
+        // Behind is where the playhead was, whichever way it went.
+        let behind = if depth > 0.0 {
+            let span = f64::from(layers.saturating_sub(2));
+            trail_behind(trail, index, f64::from(v.slit_depth), span)
+        } else {
+            [0.0; SLIT_STEPS]
+        };
+        let shown = behind.iter().map(|&b| index - f64::from(b));
+        let lo = shown.clone().fold(index, f64::min);
+        let hi = shown.fold(index, f64::max);
+        (behind, lo.floor() as i64, hi.floor() as i64 + 1)
     };
     Sample {
         base: index,
-        reach,
+        behind,
         first,
         last,
         between: v.between,
@@ -195,7 +275,7 @@ pub fn camera_sample(v: &VideoFrame, arrivals: &[Arrival], layers: u32) -> Optio
     let last = (base.floor() as i64 + 1).min(newest.seq).max(first);
     Some(Sample {
         base,
-        reach: depth,
+        behind: straight_behind(depth),
         first,
         last,
         between: v.between,
@@ -271,31 +351,92 @@ mod tests {
     #[test]
     fn nearest_and_blend_come_through() {
         let v = video(|v| v.between = Between::Nearest);
-        let s = clip_sample(&v, 4.25, 10, 24.0, 256);
-        assert_eq!((s.base, s.reach, s.between), (4.25, 0.0, Between::Nearest));
+        let s = clip_sample(&v, 4.25, &Trail::default(), 10, 24.0, 256);
+        assert_eq!((s.base, s.between), (4.25, Between::Nearest));
+        assert_eq!(s.behind, [0.0; SLIT_STEPS]);
         assert_eq!(s.window(), 4..=5, "the two frames either side");
         assert_eq!(s.slit, Slit::Off);
-        let s = clip_sample(&video(|_| {}), 4.25, 10, 24.0, 256);
+        let s = clip_sample(&video(|_| {}), 4.25, &Trail::default(), 10, 24.0, 256);
         assert_eq!(s.between, Between::Blend);
     }
 
+    /// A trail of a playhead sampled 60 times a second from `from` to `to` seconds,
+    /// continuing `trail`, at the index `at` gives for each time.
+    fn play(trail: &mut Trail, from: f64, to: f64, at: impl Fn(f64) -> f64) -> f64 {
+        let mut index = at(from);
+        for frame in 0..=((to - from) * 60.0).round() as i64 {
+            let time = from + frame as f64 / 60.0;
+            index = at(time);
+            trail.record(time, index, 30.0);
+        }
+        index
+    }
+
+    fn close(a: f32, b: f64) -> bool {
+        (f64::from(a) - b).abs() < 1e-3
+    }
+
     #[test]
-    fn slit_scan_reaches_back_the_way_the_clip_came() {
-        let forward = video(|v| {
+    fn the_trail_looks_up_where_the_playhead_was() {
+        let mut trail = Trail::default();
+        assert_eq!(trail.at(0.0), None);
+        play(&mut trail, 0.0, 2.0, |t| 24.0 * t);
+        assert!((trail.at(0.0).unwrap() - 48.0).abs() < 1e-9);
+        assert!((trail.at(0.5).unwrap() - 36.0).abs() < 1e-9);
+        assert!(
+            (trail.at(0.51).unwrap() - 35.76).abs() < 1e-9,
+            "between samples"
+        );
+        assert_eq!(trail.at(10.0), Some(0.0), "before the history starts");
+        // Paused: the same moment again only moves the latest index.
+        trail.record(2.0, 50.0, 30.0);
+        assert_eq!(trail.at(0.0), Some(50.0));
+        // Only `keep` seconds (and one point before them) are kept: the moment at 1 s
+        // is gone, so the oldest point left (2 s) stands in for it.
+        trail.record(40.0, 60.0, 1.0);
+        assert_eq!(trail.at(39.0), Some(50.0));
+        let halfway = trail.at(19.0).unwrap();
+        assert!((halfway - 55.0).abs() < 1e-9, "{halfway}");
+    }
+
+    #[test]
+    fn slit_scan_shows_where_the_playhead_was() {
+        let v = video(|v| {
             v.slit = Slit::Rows;
             v.slit_depth = 0.5;
         });
-        let s = clip_sample(&forward, 30.25, 100, 24.0, 256);
-        assert_eq!((s.reach, s.slit), (12.0, Slit::Rows));
-        assert_eq!(s.window(), 18..=31);
-        let backward = video(|v| {
-            v.slit = Slit::Rows;
-            v.slit_depth = 0.5;
-            v.speed = -1.0;
+        // Playing forwards at 24 fps: the full depth is 12 frames back.
+        let mut trail = Trail::default();
+        let index = play(&mut trail, 0.0, 2.0, |t| 24.0 * t);
+        let s = clip_sample(&v, index, &trail, 100, 24.0, 256);
+        assert_eq!(s.slit, Slit::Rows);
+        assert!(close(s.behind[0], 0.0) && close(s.behind[SLIT_STEPS - 1], 12.0));
+        assert_eq!(s.window(), 36..=49);
+        // Reversed for a quarter of a second: the recent past lies ahead of the
+        // playhead, and the depth's far end has come back round to it. No jump.
+        let index = play(&mut trail, 2.0, 2.25, |t| 48.0 - 24.0 * (t - 2.0));
+        let s = clip_sample(&v, index, &trail, 100, 24.0, 256);
+        // The turn falls between two of the table's steps.
+        let most_ahead = s.behind.iter().copied().fold(0.0, f32::min);
+        assert!((most_ahead + 6.0).abs() < 0.2, "{most_ahead}");
+        assert!(close(s.behind[SLIT_STEPS - 1], 0.0));
+        assert_eq!(s.window(), 42..=48);
+        // Stopped for longer than the depth: every row shows the still frame.
+        let index = play(&mut trail, 2.25, 3.0, |_| 42.0);
+        let s = clip_sample(&v, index, &trail, 100, 24.0, 256);
+        assert!(s.behind.iter().all(|&b| close(b, 0.0)));
+        assert_eq!(s.window(), 42..=43);
+    }
+
+    #[test]
+    fn slit_scan_starts_from_the_playhead_without_a_trail() {
+        let v = video(|v| {
+            v.slit = Slit::Columns;
+            v.slit_depth = 1.0;
         });
-        let s = clip_sample(&backward, 30.25, 100, 24.0, 256);
-        assert_eq!(s.reach, -12.0);
-        assert_eq!(s.window(), 30..=43);
+        let s = clip_sample(&v, 7.5, &Trail::default(), 100, 24.0, 256);
+        assert!(s.behind.iter().all(|&b| b == 0.0));
+        assert_eq!(s.window(), 7..=8);
     }
 
     #[test]
@@ -305,9 +446,9 @@ mod tests {
             v.slit = Slit::Columns;
             v.slit_depth = 1.0;
         });
-        let s = clip_sample(&v, 5.0, 10, 24.0, 256);
+        let s = clip_sample(&v, 5.0, &Trail::default(), 10, 24.0, 256);
         assert_eq!(s.window(), 0..=6);
-        let s = clip_sample(&v, 9.0, 10, 24.0, 256);
+        let s = clip_sample(&v, 9.0, &Trail::default(), 10, 24.0, 256);
         assert_eq!(s.window(), 0..=9, "never past the last frame");
     }
 
@@ -317,8 +458,11 @@ mod tests {
             v.slit = Slit::Rows;
             v.slit_depth = 30.0;
         });
-        let s = clip_sample(&v, 1000.5, 5000, 30.0, 64);
-        assert_eq!(s.reach, 62.0);
+        // At 4× a 30 fps clip, 30 s back is 3600 frames; the ring holds 64.
+        let mut trail = Trail::default();
+        let index = play(&mut trail, 0.0, 40.0, |t| 120.0 * t);
+        let s = clip_sample(&v, index, &trail, 5000, 30.0, 64);
+        assert!(close(s.behind[SLIT_STEPS - 1], 62.0));
         let size = s.last - s.first + 1;
         assert!(size <= 64, "{size} frames");
         assert_eq!(max_depth(64, 30.0), 62.0 / 30.0);
@@ -330,7 +474,10 @@ mod tests {
             v.slit = Slit::Map;
             v.slit_depth = 0.0;
         });
-        assert_eq!(clip_sample(&v, 3.0, 10, 24.0, 256).slit, Slit::Off);
+        assert_eq!(
+            clip_sample(&v, 3.0, &Trail::default(), 10, 24.0, 256).slit,
+            Slit::Off
+        );
     }
 
     #[test]
@@ -385,7 +532,7 @@ mod tests {
             256,
         )
         .unwrap();
-        assert!((deep.reach - 30.0).abs() < 1e-6);
+        assert!(close(deep.behind[SLIT_STEPS - 1], 30.0));
         assert_eq!(deep.first, 100, "clamped to the oldest frame");
         assert!(camera_sample(&video(|_| {}), &[], 256).is_none());
     }

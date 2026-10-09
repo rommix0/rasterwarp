@@ -85,7 +85,7 @@ Each pixel shows the input from a different moment: `offset(x, y) = slit_depth �
   - **Map:** a black-and-white image, stretched over the frame. Black is now, white is `slit_depth` ago, and gray steps lie in between. It is loaded as grayscale (any image the `image` crate opens) and sampled with linear filtering.
   - **Flip** uses `1 − map` for any of them.
 - **"Behind the playhead":**
-  - **Loop and Ping-pong:** subtract the offset (× clip fps) from the unwrapped clock's frame index in the direction of travel (`sign(speed)`, with speed 0 counting as forward), then wrap or fold it like the playhead.
+  - **Loop and Ping-pong:** the frame the playhead was actually on `offset` seconds of animation time ago, from a history of where it has been (wrapped or folded like the playhead). Slowing down, stopping and reversing stay continuous: a stopped clip settles into the still frame over `slit_depth` seconds, and a reversed one shows its recent past ahead of the playhead. Pausing freezes the history. (This replaced an earlier rule that looked back in the direction of travel, which jumped when the speed changed sign.) The frames shown are held within what the ring fits around the playhead.
   - **Scrub:** subtract from the position's frame index, clamped at frame 0.
   - **Camera:** subtract from the delayed playhead time, clamped to the oldest frame in the buffer (so `delay + slit_depth` beyond the buffer length shows the oldest frame).
 - **`between` applies per pixel:** Blend gives smooth gradients through time; Nearest gives visible stepped bands.

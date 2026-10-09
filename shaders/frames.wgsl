@@ -1,10 +1,11 @@
 // Frames: draws an input's picture from its ring of buffered frames. Each pixel finds
-// the moment it shows (the playhead, or further back for slit-scan) as a fractional
-// frame index, then shows the nearest frame or blends the two either side.
+// the moment it shows (the playhead, or for slit-scan where the playhead was, looked up
+// in a table by the pixel's map value) as a fractional frame index, then shows the
+// nearest frame or blends the two either side.
 
 struct Frames {
     // x: the playhead, as frames after the window's first frame
-    // y: frames behind the playhead at the far end of the slit-scan map (signed)
+    // y: unused
     // z: the window's last frame, after its first
     // w: unused
     playhead: vec4<f32>,
@@ -13,6 +14,9 @@ struct Frames {
     // z: slit-scan: 0 off, 1 rows, 2 columns, 3 map
     // w: bit 0 flips the map, bit 1 blends between frames
     ring: vec4<u32>,
+    // Frames behind the playhead (negative: ahead) at slit-scan map values 0, 1/63, …,
+    // 1, four to a vector.
+    behind: array<vec4<f32>, 16>,
 };
 
 @group(0) @binding(0) var<uniform> u: Frames;
@@ -35,6 +39,15 @@ fn slit_amount(uv: vec2<f32>) -> f32 {
     return m;
 }
 
+// Frames behind the playhead at map value `m`, between the table's steps.
+fn behind_at(m: f32) -> f32 {
+    let x = clamp(m, 0.0, 1.0) * 63.0;
+    let i = min(u32(x), 62u);
+    let a = u.behind[i / 4u][i % 4u];
+    let b = u.behind[(i + 1u) / 4u][(i + 1u) % 4u];
+    return mix(a, b, x - f32(i));
+}
+
 // Frame `i` of the window (0 = its first frame).
 fn frame(uv: vec2<f32>, i: f32) -> vec4<f32> {
     let layer = (u.ring.x + u32(i)) % u.ring.y;
@@ -44,7 +57,7 @@ fn frame(uv: vec2<f32>, i: f32) -> vec4<f32> {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let last = u.playhead.z;
-    let v = clamp(u.playhead.x - u.playhead.y * slit_amount(in.uv), 0.0, last);
+    let v = clamp(u.playhead.x - behind_at(slit_amount(in.uv)), 0.0, last);
     if (u.ring.w & 2u) == 0u {
         return frame(in.uv, min(round(v), last));
     }
