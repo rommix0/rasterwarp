@@ -9,7 +9,7 @@ use crate::save::saved_names;
 use crate::sequence::{SeqEvent, SeqView, Sequence};
 use crate::transition::{AbEvent, AbState};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Mode {
     /// The panel edits what's on screen.
     #[default]

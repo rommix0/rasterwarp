@@ -5,6 +5,7 @@ pub mod blend;
 pub mod canvas;
 pub mod capture;
 pub mod clock;
+pub mod control;
 pub mod curve;
 pub mod curve_editor;
 pub mod files_ui;
