@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::save::saved_names;
 
+pub mod table;
+
 /// Slider ranges. The UI uses these, and tests check that defaults fall inside them.
 pub mod ranges {
     use super::*;
@@ -91,6 +93,10 @@ pub enum Axis {
     #[default]
     X,
     Y,
+}
+
+impl Axis {
+    pub const ALL: [Axis; 2] = [Axis::X, Axis::Y];
 }
 
 saved_names!(Axis { X => "x", Y => "y" });
@@ -391,7 +397,7 @@ impl Default for VideoParams {
 
 /// The two inputs: the source the passes manipulate, and the background keyed levels
 /// show.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
     Source,
     Background,

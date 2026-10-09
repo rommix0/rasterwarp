@@ -37,15 +37,27 @@ pub struct Loaded<T> {
     pub newer: bool,
 }
 
+/// An enum saved by name (see [`saved_names`]).
+pub trait Named: Copy {
+    /// The name it is saved as.
+    fn name(self) -> &'static str;
+}
+
 /// Saves an enum as one of the given names. An unknown name (say, from a newer version)
 /// reads as the enum's default instead of failing the whole file.
 macro_rules! saved_names {
     ($ty:ty { $($variant:ident => $name:literal),+ $(,)? }) => {
+        impl $crate::save::Named for $ty {
+            fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                }
+            }
+        }
+
         impl serde::Serialize for $ty {
             fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-                s.serialize_str(match self {
-                    $(Self::$variant => $name,)+
-                })
+                s.serialize_str($crate::save::Named::name(*self))
             }
         }
 
