@@ -14,10 +14,13 @@ pub const RESCAN: Duration = Duration::from_secs(3);
 /// The client name midir gives the system.
 const CLIENT: &str = "rasterwarp";
 
+/// A port as it's told apart: its id and its name. An id alone isn't enough, since on
+/// Windows the ports of one multi-port device can share it.
+type Key = (String, String);
+
 /// An open input port.
 struct Open {
-    id: String,
-    name: String,
+    key: Key,
     /// Closes the port when dropped.
     _connection: midir::MidiInputConnection<()>,
 }
@@ -61,34 +64,47 @@ impl Midi {
         self.drain()
     }
 
+    /// Closes every port and opens them all again: the Refresh button. This is also the
+    /// way back for a device that was unplugged and replugged between two rescans, whose
+    /// old connection looks open but is dead.
+    pub fn refresh(&mut self, now: Instant) {
+        self.open.clear();
+        self.rescan(now);
+    }
+
     /// Opens ports that appeared, drops ones that went, and tries again ones that
     /// failed. Ports already open stay as they are.
-    pub fn rescan(&mut self, now: Instant) {
+    fn rescan(&mut self, now: Instant) {
         self.scanned = Some(now);
-        self.failed.clear();
-        let ports = match list() {
-            Ok(ports) => ports,
+        let tried = std::mem::take(&mut self.failed);
+        let found = match scan() {
+            Ok(found) => found,
             Err(err) => {
                 self.open.clear();
                 self.failed.push(("MIDI".into(), err));
                 return;
             }
         };
-        self.open
-            .retain(|o| ports.iter().any(|(id, _)| *id == o.id));
-        for (id, name) in ports {
-            if self.open.iter().any(|o| o.id == id) {
-                continue;
-            }
-            match connect(&id, self.sender.clone()) {
+        let keys: Vec<Key> = found
+            .iter()
+            .map(|(port, name)| (port.id(), name.clone()))
+            .collect();
+        self.open.retain(|o| keys.contains(&o.key));
+        let open: Vec<Key> = self.open.iter().map(|o| o.key.clone()).collect();
+        for i in unopened(&open, &keys) {
+            let (port, name) = &found[i];
+            match connect(port, self.sender.clone()) {
                 Ok(connection) => self.open.push(Open {
-                    id,
-                    name,
+                    key: keys[i].clone(),
                     _connection: connection,
                 }),
                 Err(err) => {
-                    log::warn!("could not open MIDI input {name}: {err}");
-                    self.failed.push((name, err));
+                    // A port another app holds fails every time; say so once.
+                    let failure = (name.clone(), err);
+                    if !tried.contains(&failure) {
+                        log::warn!("could not open MIDI input {}: {}", failure.0, failure.1);
+                    }
+                    self.failed.push(failure);
                 }
             }
         }
@@ -96,7 +112,7 @@ impl Midi {
 
     /// The open devices' names.
     pub fn devices(&self) -> Vec<String> {
-        self.open.iter().map(|o| o.name.clone()).collect()
+        self.open.iter().map(|o| o.key.1.clone()).collect()
     }
 
     /// Ports that wouldn't open at the last rescan, and why.
@@ -114,30 +130,45 @@ impl Midi {
     }
 }
 
-/// The MIDI input ports there are now, as (id, name).
-pub fn list() -> Result<Vec<(String, String)>, String> {
+/// The indices of `found` that aren't in `open`, in order.
+fn unopened(open: &[Key], found: &[Key]) -> Vec<usize> {
+    (0..found.len())
+        .filter(|&i| !open.contains(&found[i]) && !found[..i].contains(&found[i]))
+        .collect()
+}
+
+/// The MIDI input ports there are now, with their names.
+fn scan() -> Result<Vec<(midir::MidiInputPort, String)>, String> {
     let input = midir::MidiInput::new(CLIENT).map_err(|err| err.to_string())?;
     Ok(input
         .ports()
-        .iter()
+        .into_iter()
         .map(|port| {
             let name = input
-                .port_name(port)
+                .port_name(&port)
                 .unwrap_or_else(|_| "MIDI device".into());
-            (port.id(), name)
+            (port, name)
         })
         .collect())
 }
 
-/// Opens the port with id `id`, sending each message a link can use to `sender`.
-fn connect(id: &str, sender: Sender<Message>) -> Result<midir::MidiInputConnection<()>, String> {
+/// The MIDI input ports there are now, as (id, name).
+pub fn list() -> Result<Vec<(String, String)>, String> {
+    Ok(scan()?
+        .into_iter()
+        .map(|(port, name)| (port.id(), name))
+        .collect())
+}
+
+/// Opens `port`, sending each message a link can use to `sender`.
+fn connect(
+    port: &midir::MidiInputPort,
+    sender: Sender<Message>,
+) -> Result<midir::MidiInputConnection<()>, String> {
     let input = midir::MidiInput::new(CLIENT).map_err(|err| err.to_string())?;
-    let port = input
-        .find_port_by_id(id)
-        .ok_or_else(|| "it was unplugged".to_string())?;
     input
         .connect(
-            &port,
+            port,
             "rasterwarp-in",
             move |_, bytes, _| {
                 if let Some(message) = Message::parse(bytes) {
@@ -160,6 +191,23 @@ mod tests {
         for (id, name) in &ports {
             assert!(!id.is_empty(), "{name} has no id");
         }
+    }
+
+    #[test]
+    fn ports_sharing_an_id_are_told_apart_by_name() {
+        let key = |id: &str, name: &str| (id.to_string(), name.to_string());
+        let found = [
+            key("usb1", "Pad 1"),
+            key("usb1", "Pad 2"),
+            key("usb2", "Keys"),
+        ];
+        assert_eq!(
+            unopened(&[], &found),
+            [0, 1, 2],
+            "the second port isn't skipped"
+        );
+        assert_eq!(unopened(&[found[0].clone()], &found), [1, 2]);
+        assert_eq!(unopened(&found, &found), Vec::<usize>::new());
     }
 
     #[test]

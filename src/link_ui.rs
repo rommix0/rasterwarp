@@ -4,11 +4,12 @@
 
 use std::ops::RangeInclusive;
 
-use egui::{ComboBox, Response, Slider, Ui, WidgetText};
+use egui::{ComboBox, Popup, Response, SetOpenCommand, Slider, Ui, WidgetText};
 
 use crate::control::{Links, Source, Target};
 use crate::params::Params;
 use crate::params::table::{ChoiceId, SliderId};
+use crate::transition::DURATION;
 
 /// A bank slider over its whole range.
 pub fn slider(
@@ -19,6 +20,21 @@ pub fn slider(
     text: &str,
 ) -> Response {
     slider_shown(ui, links, p, id, text, id.range(), |s| s)
+}
+
+/// The transition duration's slider, in seconds.
+pub fn duration(ui: &mut Ui, links: &mut Links, seconds: &mut f32) -> Response {
+    let mut value = *seconds;
+    let response = ui.add(
+        Slider::new(&mut value, DURATION)
+            .text("duration (s)")
+            .logarithmic(true),
+    );
+    if response.changed() && !by_secondary_button(ui) {
+        *seconds = value;
+    }
+    slider_menu(ui, &response, links, Target::Duration);
+    response
 }
 
 /// A bank slider drawn over `shown`, which may be narrower than its range (a camera's
@@ -39,11 +55,17 @@ pub fn slider_shown(
         slider = slider.integer();
     }
     let response = ui.add(tweak(slider));
-    if response.changed() {
+    if response.changed() && !by_secondary_button(ui) {
         id.set(p, value);
     }
-    link_menu(&response, links, Target::Slider(id));
+    slider_menu(ui, &response, links, Target::Slider(id));
     response
+}
+
+/// Whether the secondary button is down or just came up. The slider's rail takes a
+/// press of either button as a drag, so this tells a right-click from an edit.
+fn by_secondary_button(ui: &Ui) -> bool {
+    ui.input(|i| i.pointer.secondary_down() || i.pointer.secondary_released())
 }
 
 /// Option `option` of a choice, as a selectable label: clicking picks it.
@@ -81,6 +103,19 @@ pub fn combo(ui: &mut Ui, links: &mut Links, p: &mut Params, id: ChoiceId, label
     if let Some(option) = picked {
         id.set(p, option);
     }
+    let linked: Vec<String> = labels
+        .iter()
+        .enumerate()
+        .filter_map(|(option, label)| {
+            let sources = sources(links, Target::Choice(id, option));
+            (!sources.is_empty()).then(|| format!("{} → {label}", names(&sources)))
+        })
+        .collect();
+    if !linked.is_empty() {
+        response
+            .clone()
+            .on_hover_text(format!("MIDI: {}", linked.join(", ")));
+    }
     response.context_menu(|ui| {
         for (option, label) in labels.iter().enumerate() {
             menu_items(
@@ -96,13 +131,37 @@ pub fn combo(ui: &mut Ui, links: &mut Links, p: &mut Params, id: ChoiceId, label
 /// Adds the right-click menu that links `target` to MIDI or unlinks it, and names its
 /// links when hovered.
 pub fn link_menu(response: &Response, links: &mut Links, target: Target) {
+    name_links(response, links, target);
+    response.context_menu(|ui| menu_items(ui, links, target, "Link to MIDI"));
+}
+
+/// [`link_menu`] for a slider. The rail only senses drags, so it never reports a
+/// right-click and `context_menu` would open on the value box alone; this opens the
+/// same menu when the button comes up anywhere over the slider.
+fn slider_menu(ui: &Ui, response: &Response, links: &mut Links, target: Target) {
+    name_links(response, links, target);
+    let right_clicked = response.contains_pointer() && ui.input(|i| i.pointer.secondary_clicked());
+    let open = if right_clicked || response.secondary_clicked() {
+        Some(SetOpenCommand::Bool(true))
+    } else if response.clicked() {
+        Some(SetOpenCommand::Bool(false))
+    } else {
+        None
+    };
+    Popup::menu(response)
+        .open_memory(open)
+        .at_pointer_fixed()
+        .show(|ui| menu_items(ui, links, target, "Link to MIDI"));
+}
+
+/// Hover text naming the controls linked to `target`, if there are any.
+fn name_links(response: &Response, links: &Links, target: Target) {
     let linked = sources(links, target);
     if !linked.is_empty() {
         response
             .clone()
             .on_hover_text(format!("MIDI: {}", names(&linked)));
     }
-    response.context_menu(|ui| menu_items(ui, links, target, "Link to MIDI"));
 }
 
 /// "Link to MIDI", then "Unlink …" for each control linked to `target`.
@@ -151,6 +210,82 @@ mod tests {
         // The font textures it made would otherwise panic when dropped unapplied.
         let mut textures = output.textures_delta;
         textures.clear();
+    }
+
+    /// Presses and releases `button` over the rail of the slider `draw` shows, one
+    /// headless frame at a time, and gives the context to look at afterwards.
+    fn click_rail(
+        button: egui::PointerButton,
+        mut draw: impl FnMut(&mut Ui) -> Response,
+    ) -> egui::Context {
+        let ctx = egui::Context::default();
+        let mut rail = egui::Pos2::ZERO;
+        let mut step = |events: Vec<egui::Event>| {
+            let raw = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            let output = ctx.run_ui(raw, |ui| {
+                let rect = draw(ui).rect;
+                rail = egui::pos2(rect.min.x + 30.0, rect.center().y);
+            });
+            let mut textures = output.textures_delta;
+            textures.clear();
+            rail
+        };
+        let pointer = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // The first frame finds the slider; the pointer then has to be seen over it
+        // before a press can land on it.
+        let at = step(vec![]);
+        step(vec![egui::Event::PointerMoved(at)]);
+        step(vec![egui::Event::PointerMoved(at)]);
+        step(vec![pointer(at, true)]);
+        step(vec![pointer(at, false)]);
+        step(vec![]);
+        step(vec![]);
+        ctx
+    }
+
+    #[test]
+    fn a_primary_click_on_the_rail_moves_the_slider_but_opens_no_menu() {
+        let mut p = Params::default();
+        let id = SliderId::Video(Role::Source, VideoSlider::Delay);
+        id.set(&mut p, 2.0);
+        let mut links = Links::default();
+        let ctx = click_rail(egui::PointerButton::Primary, |ui| {
+            slider_shown(ui, &mut links, &mut p, id, "delay", 0.0..=2.0, |s| s)
+        });
+        assert!(id.get(&p) < 1.5, "the click lands on the rail");
+        assert!(!Popup::is_any_open(&ctx));
+    }
+
+    #[test]
+    fn right_clicking_a_slider_rail_opens_the_menu_and_leaves_the_value() {
+        let mut p = Params::default();
+        let id = SliderId::Video(Role::Source, VideoSlider::Delay);
+        id.set(&mut p, 2.0);
+        let mut links = Links::default();
+        let ctx = click_rail(egui::PointerButton::Secondary, |ui| {
+            slider_shown(ui, &mut links, &mut p, id, "delay", 0.0..=2.0, |s| s)
+        });
+        assert_eq!(id.get(&p), 2.0);
+        assert!(Popup::is_any_open(&ctx), "the link menu is open");
+    }
+
+    #[test]
+    fn right_clicking_the_duration_slider_opens_the_menu_and_leaves_the_value() {
+        let mut seconds = 30.0;
+        let mut links = Links::default();
+        let ctx = click_rail(egui::PointerButton::Secondary, |ui| {
+            duration(ui, &mut links, &mut seconds)
+        });
+        assert_eq!(seconds, 30.0);
+        assert!(Popup::is_any_open(&ctx), "the link menu is open");
     }
 
     #[test]

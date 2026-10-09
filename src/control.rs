@@ -31,12 +31,13 @@ pub enum Message {
 
 impl Message {
     /// Reads one MIDI message: a control change, the pitch wheel or a note-on. Anything
-    /// else (note-offs, a note-on with velocity 0, clock, sysex) is None.
+    /// else (note-offs, a note-on with velocity 0, clock, sysex, and the channel mode
+    /// messages CC 120–127 such as All Notes Off, which are no knob) is None.
     pub fn parse(bytes: &[u8]) -> Option<Message> {
         let (&status, data) = bytes.split_first()?;
         let channel = (status & 0x0F) + 1;
         match (status & 0xF0, data) {
-            (0xB0, &[number, value, ..]) => Some(Message::Cc {
+            (0xB0, &[number, value, ..]) if number & 0x7F < 120 => Some(Message::Cc {
                 channel,
                 number: number & 0x7F,
                 value: value & 0x7F,
@@ -283,7 +284,7 @@ impl Target {
             Target::Slider(id) => id.label(),
             Target::Duration => "Transition duration".into(),
             Target::Choice(id, option) => format!("{}: {}", id.label(), id.options()[option]),
-            Target::Mode(mode) => format!("Mode: {}", mode.name()),
+            Target::Mode(mode) => format!("Mode: {mode:?}"),
             Target::Action(action) => action.label().into(),
         }
     }
@@ -524,8 +525,9 @@ pub mod saved_links {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::Role;
+    use crate::motion::Motion;
     use crate::params::table::{OscSlider, VideoSlider};
+    use crate::params::{Params, Role};
 
     #[test]
     fn messages_are_read_from_their_bytes() {
@@ -565,6 +567,21 @@ mod tests {
         );
         assert_eq!(Message::parse(&[0x80, 60, 64]), None, "note-off");
         assert_eq!(Message::parse(&[0xF8]), None, "clock");
+        assert_eq!(
+            Message::parse(&[0xB0, 119, 5]),
+            Some(Message::Cc {
+                channel: 1,
+                number: 119,
+                value: 5
+            }),
+            "the last knob number"
+        );
+        assert_eq!(Message::parse(&[0xB0, 123, 0]), None, "all notes off");
+        assert_eq!(
+            Message::parse(&[0xB5, 121, 0]),
+            None,
+            "reset all controllers"
+        );
         assert_eq!(Message::parse(&[0xB0, 1]), None, "cut short");
         assert_eq!(Message::parse(&[]), None);
     }
@@ -682,7 +699,7 @@ mod tests {
         assert_eq!(targets[0].label(), "Osc 1 amplitude");
         assert_eq!(targets[2].label(), "Transition duration");
         assert_eq!(targets[3].label(), "Osc 3 waveform: square");
-        assert_eq!(targets[4].label(), "Mode: transition");
+        assert_eq!(targets[4].label(), "Mode: Transition");
         assert_eq!(targets[5].label(), "Background camera loop");
         assert!(targets[0].continuous() && targets[2].continuous());
         assert!(!targets[3].continuous() && !targets[4].continuous() && !targets[5].continuous());
@@ -808,9 +825,6 @@ mod tests {
         let empty: Holder = serde_json::from_value(serde_json::json!({ "links": "nope" })).unwrap();
         assert!(empty.links.is_empty());
     }
-
-    use crate::motion::Motion;
-    use crate::params::Params;
 
     fn cc(number: u8, value: u8) -> Message {
         Message::Cc {

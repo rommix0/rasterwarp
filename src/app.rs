@@ -1361,7 +1361,7 @@ impl State {
         }
         self.input_actions(actions.inputs);
         if actions.refresh_midi {
-            self.midi.rescan(Instant::now());
+            self.midi.refresh(Instant::now());
         }
         if actions.stop_recording {
             self.stop_recording();

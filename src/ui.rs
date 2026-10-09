@@ -22,7 +22,7 @@ use crate::params::{
 };
 use crate::rate::FrameRate;
 use crate::sequence::{FRAMES_PER_SECOND, MAX_FRAME};
-use crate::transition::{AbState, DURATION};
+use crate::transition::AbState;
 
 /// UI-only state that isn't a render parameter.
 #[derive(Default)]
@@ -471,12 +471,7 @@ fn transition_controls(ui: &mut Ui, motion: &mut Motion, links: &mut Links) {
     });
     let progress = motion.ab.ramp().map_or(0.0, |r| r.progress);
     ui.add(ProgressBar::new(progress).show_percentage());
-    let duration = ui.add(
-        Slider::new(&mut motion.ab.duration, DURATION)
-            .text("duration (s)")
-            .logarithmic(true),
-    );
-    link_ui::link_menu(&duration, links, Target::Duration);
+    link_ui::duration(ui, links, &mut motion.ab.duration);
     curve_picker(ui, "ab curve", &motion.curves, &mut motion.ab.curve);
 }
 
