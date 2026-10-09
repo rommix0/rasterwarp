@@ -1,12 +1,14 @@
 ![](images/program_screenshot.jpg)
 
-<img src="images/decal.png" title="" alt="" data-align="center" /> 
+<img src="images/decal.png" title="" alt="" data-align="center" />
 
 **Developed by Anthony C. Bartman (@rommix0)**
 
 Real-time video animation software heavily inspired by old video synthesizers from the 70s such as Scanimate.
 
 Warp using oscillator-driven deflection, colorized by brightness level, with CRT glow and feedback trails. It runs on the GPU and can be played live using audio input and MIDI.
+
+The program is still in its early stages, so if you run into any bugs, raise an issue or do a pull request.
 
 ## Features
 
