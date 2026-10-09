@@ -3,7 +3,7 @@
 
 use std::ops::RangeInclusive;
 
-use crate::motion::Mode;
+use crate::motion::{Mode, Motion};
 use crate::params::table::{ChoiceId, SliderId};
 use crate::save::Named;
 use crate::transition::DURATION;
@@ -346,6 +346,95 @@ impl Link {
         } else {
             value
         }
+    }
+}
+
+/// The links in use, and the target waiting for a control while one is being learned.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Links {
+    /// Every link, in the order they were made.
+    pub list: Vec<Link>,
+    learning: Option<Target>,
+}
+
+impl Links {
+    /// Links with nothing being learned.
+    pub fn new(list: Vec<Link>) -> Links {
+        Links {
+            list,
+            learning: None,
+        }
+    }
+
+    /// Waits for the next fitting control to link to `target`, instead of any target
+    /// that was waiting.
+    pub fn learn(&mut self, target: Target) {
+        self.learning = Some(target);
+    }
+
+    /// The target waiting for a control.
+    pub fn learning(&self) -> Option<Target> {
+        self.learning
+    }
+
+    /// Stops waiting for a control.
+    pub fn cancel(&mut self) {
+        self.learning = None;
+    }
+
+    /// The links that drive `target`.
+    pub fn to(&self, target: Target) -> impl Iterator<Item = &Link> {
+        self.list.iter().filter(move |l| l.target == target)
+    }
+
+    /// Removes the link from `source` to `target`, if there is one.
+    pub fn unlink(&mut self, source: Source, target: Target) {
+        self.list
+            .retain(|l| !(l.source == source && l.target == target));
+    }
+
+    /// Removes link `index` of the list, if there is one.
+    pub fn remove(&mut self, index: usize) {
+        if index < self.list.len() {
+            self.list.remove(index);
+        }
+    }
+
+    /// Handles one message from a controller. While learning, a fitting message (a wheel
+    /// or fader for a slider, a key for a choice or action) links the target waiting and
+    /// does nothing else, and one that doesn't fit is ignored. Otherwise each link it
+    /// drives moves its slider or picks its option in `motion`, as a hand on the panel
+    /// would, and the actions it asks for are returned for the app to run.
+    pub fn handle(&mut self, message: Message, motion: &mut Motion) -> Vec<Action> {
+        let source = message.source();
+        if let Some(target) = self.learning {
+            if source.continuous() == target.continuous() {
+                if !self
+                    .list
+                    .iter()
+                    .any(|l| l.source == source && l.target == target)
+                {
+                    self.list.push(Link::new(source, target));
+                }
+                self.learning = None;
+            }
+            return Vec::new();
+        }
+        let mut actions = Vec::new();
+        for link in self.list.iter().filter(|l| l.source == source) {
+            match (link.target, message.amount()) {
+                (Target::Slider(id), Some(amount)) => id.set(motion.editable(), link.value(amount)),
+                (Target::Duration, Some(amount)) => {
+                    motion.ab.duration =
+                        link.value(amount).clamp(*DURATION.start(), *DURATION.end());
+                }
+                (Target::Choice(id, option), None) => id.set(motion.editable(), option),
+                (Target::Mode(mode), None) => motion.set_mode(mode),
+                (Target::Action(action), None) => actions.push(action),
+                _ => {}
+            }
+        }
+        actions
     }
 }
 
@@ -718,5 +807,235 @@ mod tests {
         );
         let empty: Holder = serde_json::from_value(serde_json::json!({ "links": "nope" })).unwrap();
         assert!(empty.links.is_empty());
+    }
+
+    use crate::motion::Motion;
+    use crate::params::Params;
+
+    fn cc(number: u8, value: u8) -> Message {
+        Message::Cc {
+            channel: 1,
+            number,
+            value,
+        }
+    }
+
+    fn key(number: u8) -> Message {
+        Message::NoteOn { channel: 1, number }
+    }
+
+    const AMPLITUDE: Target = Target::Slider(SliderId::Osc(0, OscSlider::Amplitude));
+
+    #[test]
+    fn a_wheel_links_a_slider_and_keys_are_ignored_while_learning_it() {
+        let mut links = Links::default();
+        let mut motion = Motion::new(Params::default());
+        links.learn(AMPLITUDE);
+        assert_eq!(links.learning(), Some(AMPLITUDE));
+        assert!(links.handle(key(60), &mut motion).is_empty());
+        assert_eq!(
+            links.learning(),
+            Some(AMPLITUDE),
+            "a key doesn't fit a slider"
+        );
+        let before = motion.editable().warp.oscillators[0].amplitude;
+        links.handle(cc(1, 127), &mut motion);
+        assert_eq!(links.learning(), None);
+        assert_eq!(
+            links.list,
+            [Link::new(
+                Source::Cc {
+                    channel: 1,
+                    number: 1
+                },
+                AMPLITUDE
+            )]
+        );
+        assert_eq!(
+            motion.editable().warp.oscillators[0].amplitude,
+            before,
+            "the message that links does nothing else"
+        );
+    }
+
+    #[test]
+    fn a_key_links_an_action_or_option_and_wheels_are_ignored_while_learning_it() {
+        let mut links = Links::default();
+        let mut motion = Motion::new(Params::default());
+        let cut = Target::Action(Action::Cut);
+        links.learn(cut);
+        links.handle(cc(1, 5), &mut motion);
+        links.handle(
+            Message::Pitch {
+                channel: 1,
+                value: 0,
+            },
+            &mut motion,
+        );
+        assert_eq!(links.learning(), Some(cut));
+        links.handle(key(61), &mut motion);
+        let square = Target::Choice(ChoiceId::Waveform(0), 3);
+        links.learn(square);
+        links.handle(key(62), &mut motion);
+        assert_eq!(
+            links.list,
+            [
+                Link::new(
+                    Source::Note {
+                        channel: 1,
+                        number: 61
+                    },
+                    cut
+                ),
+                Link::new(
+                    Source::Note {
+                        channel: 1,
+                        number: 62
+                    },
+                    square
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn relearning_a_pair_keeps_one_link_and_cancel_stops_learning() {
+        let mut links = Links::default();
+        let mut motion = Motion::new(Params::default());
+        for _ in 0..2 {
+            links.learn(AMPLITUDE);
+            links.handle(cc(1, 0), &mut motion);
+        }
+        assert_eq!(links.list.len(), 1);
+        links.learn(Target::Action(Action::Cut));
+        links.learn(AMPLITUDE);
+        assert_eq!(
+            links.learning(),
+            Some(AMPLITUDE),
+            "learning another replaces it"
+        );
+        links.cancel();
+        assert_eq!(links.learning(), None);
+        links.handle(cc(7, 0), &mut motion);
+        assert_eq!(links.list.len(), 1, "cancelled: nothing linked");
+    }
+
+    #[test]
+    fn links_are_found_by_target_and_removed() {
+        let a = Source::Cc {
+            channel: 1,
+            number: 1,
+        };
+        let b = Source::Pitch { channel: 1 };
+        let mut links = Links::new(vec![
+            Link::new(a, AMPLITUDE),
+            Link::new(b, AMPLITUDE),
+            Link::new(a, Target::Slider(SliderId::Zoom)),
+        ]);
+        let sources: Vec<Source> = links.to(AMPLITUDE).map(|l| l.source).collect();
+        assert_eq!(sources, [a, b]);
+        links.unlink(a, AMPLITUDE);
+        assert_eq!(links.to(AMPLITUDE).count(), 1);
+        assert_eq!(links.to(Target::Slider(SliderId::Zoom)).count(), 1);
+        links.remove(0);
+        links.remove(9); // out of range: nothing happens
+        assert_eq!(links.list, [Link::new(a, Target::Slider(SliderId::Zoom))]);
+    }
+
+    #[test]
+    fn wheels_move_the_bank_the_panel_edits() {
+        let mut links = Links::new(vec![Link::new(
+            Source::Cc {
+                channel: 1,
+                number: 1,
+            },
+            Target::Slider(SliderId::Zoom),
+        )]);
+        let mut motion = Motion::new(Params::default());
+        links.handle(cc(1, 127), &mut motion);
+        assert_eq!(
+            motion.ab.banks[motion.ab.on_air].warp.zoom, 4.0,
+            "Live: on air"
+        );
+
+        motion.set_mode(Mode::Transition);
+        links.handle(cc(1, 0), &mut motion);
+        assert_eq!(
+            motion.ab.banks[motion.ab.off_air()].warp.zoom,
+            0.1,
+            "Transition: off air"
+        );
+        assert_eq!(motion.ab.banks[motion.ab.on_air].warp.zoom, 4.0);
+
+        motion.set_mode(Mode::Sequence);
+        let seq = motion.sequence_mut();
+        seq.add_cue();
+        seq.selected = 1;
+        links.handle(cc(1, 0), &mut motion);
+        let seq = motion.sequence_mut();
+        assert_eq!(
+            seq.cues()[1].params.warp.zoom,
+            0.1,
+            "Sequence: the selected cue"
+        );
+        assert_eq!(
+            seq.cues()[0].params.warp.zoom,
+            4.0,
+            "the other cue is left alone"
+        );
+    }
+
+    #[test]
+    fn keys_pick_options_and_modes_and_report_actions() {
+        let note = |n| Source::Note {
+            channel: 1,
+            number: n,
+        };
+        let mut links = Links::new(vec![
+            Link::new(note(60), Target::Choice(ChoiceId::Waveform(1), 3)),
+            Link::new(note(61), Target::Mode(Mode::Transition)),
+            Link::new(note(62), Target::Action(Action::Cut)),
+            Link::new(note(62), Target::Action(Action::Pause)),
+            Link::new(Source::Pitch { channel: 1 }, Target::Duration),
+        ]);
+        let mut motion = Motion::new(Params::default());
+        assert!(links.handle(key(60), &mut motion).is_empty());
+        assert_eq!(
+            motion.editable().warp.oscillators[1].waveform,
+            crate::params::Waveform::Square
+        );
+        links.handle(key(61), &mut motion);
+        assert_eq!(motion.mode(), Mode::Transition);
+        assert_eq!(
+            links.handle(key(62), &mut motion),
+            [Action::Cut, Action::Pause]
+        );
+        links.handle(
+            Message::Pitch {
+                channel: 1,
+                value: 8192,
+            },
+            &mut motion,
+        );
+        assert!(
+            (motion.ab.duration - 15.05).abs() < 1e-4,
+            "halfway from 0.1 to 30"
+        );
+        assert!(
+            links.handle(key(70), &mut motion).is_empty(),
+            "an unlinked key"
+        );
+        assert!(
+            links
+                .handle(
+                    Message::NoteOn {
+                        channel: 2,
+                        number: 62
+                    },
+                    &mut motion
+                )
+                .is_empty(),
+            "another channel"
+        );
     }
 }
