@@ -2,6 +2,7 @@
 //! sliders follow, and beats that fire options and actions the way a MIDI key does.
 
 pub mod analysis;
+pub mod file;
 
 use std::ops::RangeInclusive;
 
