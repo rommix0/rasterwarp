@@ -1,11 +1,13 @@
 //! Drawing linkable controls: sliders and choices from the parameter table, written
 //! through its setters (so the panel and MIDI follow the same rules), and the
-//! right-click menu that links any control to MIDI or unlinks it.
+//! right-click menu that links any control to MIDI or audio, or unlinks it.
 
 use std::ops::RangeInclusive;
 
 use egui::{ComboBox, Popup, Response, SetOpenCommand, Slider, Ui, WidgetText};
 
+use crate::audio::{Beat, Signal};
+use crate::audio_links::{AudioLinks, fires};
 use crate::control::{Links, Source, Target};
 use crate::params::Params;
 use crate::params::table::{ChoiceId, SliderId};
@@ -107,32 +109,33 @@ pub fn combo(ui: &mut Ui, links: &mut Links, p: &mut Params, id: ChoiceId, label
         .iter()
         .enumerate()
         .filter_map(|(option, label)| {
-            let sources = sources(links, Target::Choice(id, option));
-            (!sources.is_empty()).then(|| format!("{} → {label}", names(&sources)))
+            let names = link_names(links, Target::Choice(id, option))?;
+            Some(format!("{label}: {names}"))
         })
         .collect();
     if !linked.is_empty() {
-        response
-            .clone()
-            .on_hover_text(format!("MIDI: {}", linked.join(", ")));
+        response.clone().on_hover_text(linked.join(
+            "
+",
+        ));
     }
     response.context_menu(|ui| {
         for (option, label) in labels.iter().enumerate() {
-            menu_items(
-                ui,
-                links,
-                Target::Choice(id, option),
-                &format!("Link {label} to MIDI"),
-            );
+            let target = Target::Choice(id, option);
+            menu_items(ui, links, target, &format!("Link {label} to MIDI"));
+            audio_items(ui, &mut links.audio, target, Some(label));
         }
     });
 }
 
-/// Adds the right-click menu that links `target` to MIDI or unlinks it, and names its
-/// links when hovered.
+/// Adds the right-click menu that links `target` to MIDI or audio, or unlinks it, and
+/// names its links when hovered.
 pub fn link_menu(response: &Response, links: &mut Links, target: Target) {
     name_links(response, links, target);
-    response.context_menu(|ui| menu_items(ui, links, target, "Link to MIDI"));
+    response.context_menu(|ui| {
+        menu_items(ui, links, target, "Link to MIDI");
+        audio_items(ui, &mut links.audio, target, None);
+    });
 }
 
 /// [`link_menu`] for a slider. The rail only senses drags, so it never reports a
@@ -151,16 +154,80 @@ fn slider_menu(ui: &Ui, response: &Response, links: &mut Links, target: Target) 
     Popup::menu(response)
         .open_memory(open)
         .at_pointer_fixed()
-        .show(|ui| menu_items(ui, links, target, "Link to MIDI"));
+        .show(|ui| {
+            menu_items(ui, links, target, "Link to MIDI");
+            audio_items(ui, &mut links.audio, target, None);
+        });
 }
 
-/// Hover text naming the controls linked to `target`, if there are any.
+/// Everything linked to `target`, for a hover text: "MIDI: CC 1 ch 1 · Audio: Bass
+/// +0.50 · Beat: Any". None when nothing is.
+fn link_names(links: &Links, target: Target) -> Option<String> {
+    let mut parts = Vec::new();
+    let midi = sources(links, target);
+    if !midi.is_empty() {
+        parts.push(format!("MIDI: {}", names(&midi)));
+    }
+    if let Target::Slider(id) = target {
+        for link in links.audio.follow.iter().filter(|l| l.slider == id) {
+            parts.push(format!("Audio: {} {:+.2}", link.signal.label(), link.depth));
+        }
+    }
+    for beat in links.audio.beats_for(target) {
+        parts.push(format!("Beat: {}", beat.label()));
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+/// Names `target`'s links when the control is hovered.
 fn name_links(response: &Response, links: &Links, target: Target) {
-    let linked = sources(links, target);
-    if !linked.is_empty() {
-        response
-            .clone()
-            .on_hover_text(format!("MIDI: {}", names(&linked)));
+    if let Some(text) = link_names(links, target) {
+        response.clone().on_hover_text(text);
+    }
+}
+
+/// "Audio: Level" … for a slider and "Beat: Any" … for anything a beat can fire, or
+/// "Unlink …" for links already made. `option` names a drop-down's option.
+fn audio_items(ui: &mut Ui, links: &mut AudioLinks, target: Target, option: Option<&str>) {
+    let on = option.map(|o| format!(" → {o}")).unwrap_or_default();
+    match target {
+        Target::Slider(id) => {
+            ui.separator();
+            let linked = links.signals_for(id);
+            for signal in Signal::ALL {
+                if linked.contains(&signal) {
+                    if ui
+                        .button(format!("Unlink Audio: {}", signal.label()))
+                        .clicked()
+                    {
+                        links.unfollow(signal, id);
+                        ui.close();
+                    }
+                } else if ui.button(format!("Audio: {}", signal.label())).clicked() {
+                    links.follow_signal(signal, id);
+                    ui.close();
+                }
+            }
+        }
+        target if fires(target) => {
+            ui.separator();
+            let linked = links.beats_for(target);
+            for beat in Beat::ALL {
+                if linked.contains(&beat) {
+                    if ui
+                        .button(format!("Unlink Beat: {}{on}", beat.label()))
+                        .clicked()
+                    {
+                        links.unfire(beat, target);
+                        ui.close();
+                    }
+                } else if ui.button(format!("Beat: {}{on}", beat.label())).clicked() {
+                    links.fire_on(beat, target);
+                    ui.close();
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -313,5 +380,54 @@ mod tests {
             combo(ui, &mut links, &mut p, id, labels);
         });
         assert_eq!(id.get(&p), 2);
+    }
+
+    #[test]
+    fn hover_text_names_midi_and_audio_links() {
+        use crate::audio::{Beat, Signal};
+        use crate::control::Action;
+        let mut links = Links::default();
+        links.audio.follow_signal(Signal::Bass, SliderId::Zoom);
+        links.audio.follow[0].depth = 0.5;
+        assert_eq!(
+            link_names(&links, Target::Slider(SliderId::Zoom)),
+            Some("Audio: Bass +0.50".to_string())
+        );
+        links.audio.fire_on(Beat::Any, Target::Action(Action::Cut));
+        assert_eq!(
+            link_names(&links, Target::Action(Action::Cut)),
+            Some("Beat: Any".to_string())
+        );
+        assert_eq!(link_names(&links, Target::Action(Action::Pause)), None);
+    }
+
+    #[test]
+    fn the_audio_section_draws_with_and_without_links() {
+        use crate::audio::Signal;
+        use crate::audio_ui::{AudioActions, AudioUi, audio_section};
+        let mut links = Links::default();
+        let params = Params::default();
+        let mut audio = AudioUi::default();
+        frame(|ui| {
+            audio_section(
+                ui,
+                &mut audio,
+                &mut links,
+                &params,
+                &[],
+                &mut AudioActions::default(),
+            )
+        });
+        links.audio.follow_signal(Signal::Level, SliderId::Zoom);
+        frame(|ui| {
+            audio_section(
+                ui,
+                &mut audio,
+                &mut links,
+                &params,
+                &[(SliderId::Zoom, 0.25)],
+                &mut AudioActions::default(),
+            )
+        });
     }
 }

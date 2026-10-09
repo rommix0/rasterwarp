@@ -15,8 +15,10 @@ use winit::event_loop::ActiveEventLoop;
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::audio::Audio;
+use crate::audio::input::{input_devices, output_devices};
+use crate::audio::{Audio, Beat, SourceChoice};
 use crate::audio_links::AudioLinks;
+use crate::audio_ui::{AudioActions, SourceKind};
 use crate::blend::FrameParams;
 use crate::canvas::{self, CanvasChoice};
 use crate::capture::CaptureMode;
@@ -430,6 +432,7 @@ impl State {
         self.audio.set_looping(audio.looping);
         self.audio.set_output(&audio.output);
         self.ui.audio.start_with_recording = audio.start_with_recording;
+        self.ui.audio.kind = SourceKind::of(&audio.source);
         self.ui.midi.links.audio = AudioLinks {
             follow: audio.follow.clone(),
             beats: audio.beats.clone(),
@@ -811,6 +814,70 @@ impl State {
                 }
                 None => {}
             }
+        }
+    }
+
+    /// Shows the audio engine's state in the Audio section.
+    fn show_audio(&mut self) {
+        let a = &mut self.ui.audio;
+        a.chosen = self.audio.choice().clone();
+        a.file = self.audio.file();
+        a.loading = self
+            .audio
+            .loading()
+            .map(|(name, done)| format!("Loading {name}… {:.0}%", done * 100.0));
+        a.error = self.audio.error().map(str::to_string);
+        a.shaping = self.audio.shaping();
+        a.volume = self.audio.volume();
+        a.looping = self.audio.looping();
+        a.output = self.audio.output().to_string();
+        a.meter = self.audio.meter();
+    }
+
+    /// Applies the Audio section's edits and requests.
+    fn audio_actions(&mut self, actions: AudioActions) {
+        let a = &self.ui.audio;
+        self.audio.set_shaping(a.shaping);
+        self.audio.set_volume(a.volume);
+        self.audio.set_looping(a.looping);
+        let output = a.output.clone();
+        self.audio.set_output(&output);
+        if let Some(choice) = actions.use_source {
+            self.audio.use_choice(choice, &self.budget);
+        }
+        if actions.choose_file {
+            self.audio.hold();
+            let picked = rfd::FileDialog::new()
+                .set_title("Open a sound file")
+                .add_filter("Sound", SOUND_EXTENSIONS)
+                .pick_file();
+            if let Some(path) = picked {
+                self.audio
+                    .use_choice(SourceChoice::File(absolute(&path)), &self.budget);
+            }
+            // The dialog blocks the app; that must not make canvas frames late.
+            self.clock.reanchor(self.seconds());
+        }
+        if actions.list_devices {
+            self.audio.hold();
+            let (inputs, outputs) = (input_devices(), output_devices());
+            self.ui.audio.listing_error = inputs.as_ref().err().or(outputs.as_ref().err()).cloned();
+            self.ui.audio.inputs = Some(inputs.unwrap_or_default());
+            self.ui.audio.outputs = Some(outputs.unwrap_or_default());
+            self.audio.retry(&self.budget);
+            self.clock.reanchor(self.seconds());
+        }
+        if let Some(playing) = actions.play {
+            self.audio.set_playing(playing);
+        }
+        if actions.restart {
+            self.audio.restart();
+        }
+        if let Some(seconds) = actions.seek {
+            self.audio.seek(seconds);
+        }
+        if let Some(beat) = actions.tap {
+            self.audio.tap(beat);
         }
     }
 
@@ -1257,6 +1324,11 @@ impl State {
         let paused = self.ui.paused;
         let period = self.clock.rate().period();
         let audio_frame = self.audio.frame(if paused { 0.0 } else { period });
+        for beat in Beat::ALL {
+            if audio_frame.signals.beat(beat) {
+                self.ui.audio.lit[beat.index()] = Some(Instant::now());
+            }
+        }
         let links = &self.ui.midi.links.audio;
         let fired = links.fired(&audio_frame.signals);
         self.motion.set_offsets(links.offsets(&audio_frame.signals));
@@ -1433,6 +1505,7 @@ impl State {
             });
         self.poll_inputs();
         self.show_inputs();
+        self.show_audio();
         self.ui.late = self.clock.late();
         self.ui.files.project_name = self.project_name();
         self.ui.files.unsaved = self.unsaved(&self.project());
@@ -1471,6 +1544,7 @@ impl State {
             self.choose_capture_folder();
         }
         self.input_actions(actions.inputs);
+        self.audio_actions(std::mem::take(&mut actions.audio));
         if actions.refresh_midi {
             self.midi.refresh(Instant::now());
         }
@@ -1587,6 +1661,9 @@ fn file_problem(what: &str, path: &Path, err: &anyhow::Error) -> String {
 const MEDIA_EXTENSIONS: &[&str] = &[
     "png", "jpg", "jpeg", "mp4", "mov", "mkv", "avi", "webm", "m4v",
 ];
+
+/// What the sound-file dialog offers.
+const SOUND_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "m4a", "aac", "opus"];
 
 /// `path` made absolute, so a saved project finds it from any working directory.
 fn absolute(path: &Path) -> PathBuf {

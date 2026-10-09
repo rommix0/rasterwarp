@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use egui::{Button, CollapsingHeader, ComboBox, ProgressBar, Slider, Ui};
 
-use crate::audio_ui::AudioUi;
+use crate::audio_ui::{self, AudioActions, AudioUi};
 use crate::canvas::{CanvasChoice, PRESETS};
 use crate::capture::CaptureMode;
 use crate::capture::encode::VideoFormat;
@@ -98,6 +98,8 @@ pub struct UiActions {
     pub inputs: InputActions,
     /// Look for MIDI devices again.
     pub refresh_midi: bool,
+    /// What the Audio section asked for.
+    pub audio: AudioActions,
     /// The part of the window left for the canvas, in points (beside the panel).
     pub canvas_rect: Option<egui::Rect>,
 }
@@ -190,6 +192,16 @@ pub fn draw(
                 rate_section(ui, &mut state.rate, recording);
                 canvas_section(ui, &mut state.canvas, recording, &mut actions);
                 actions.refresh_midi = midi_ui::midi_section(ui, &mut state.midi);
+                let base = *motion.editable();
+                let offsets = motion.offsets().to_vec();
+                audio_ui::audio_section(
+                    ui,
+                    &mut state.audio,
+                    &mut state.midi.links,
+                    &base,
+                    &offsets,
+                    &mut actions.audio,
+                );
                 mode_section(ui, motion, &mut state.midi.links);
                 for role in Role::ALL {
                     inputs_ui::input_section(
