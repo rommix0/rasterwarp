@@ -350,11 +350,12 @@ impl Input {
                 };
                 for k in pass.missing(device, &sample) {
                     if let Some(frame) = camera.frame(k) {
+                        let pixels = if small { &frame.small } else { &frame.full };
                         // One from a reopening between the check above and now.
-                        if frame.full.len() as u64 != format.bytes_at(pass.size()) {
+                        if pixels.len() as u64 != format.bytes_at(pass.size()) {
                             continue;
                         }
-                        pass.upload(queue, k, if small { &frame.small } else { &frame.full });
+                        pass.upload(queue, k, pixels);
                     }
                 }
                 sample
