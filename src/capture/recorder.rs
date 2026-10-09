@@ -21,6 +21,9 @@ pub struct RecordSettings {
     pub folder: PathBuf,
     /// Stop automatically after this many seconds of video (0 = stop by hand).
     pub stop_after: f32,
+    /// Record and save stills with a transparent background: keyed levels and the
+    /// background behind them become see-through.
+    pub alpha: bool,
 }
 
 impl Default for RecordSettings {
@@ -30,7 +33,18 @@ impl Default for RecordSettings {
             mode: CaptureMode::RealTime,
             folder: PathBuf::from("captures"),
             stop_after: 0.0,
+            alpha: false,
         }
+    }
+}
+
+impl RecordSettings {
+    /// Why these settings can't record, if they can't.
+    pub fn check(&self) -> Result<()> {
+        if self.alpha && !self.format.carries_alpha() {
+            bail!("HEVC can't carry alpha; choose ProRes 4444 or FFV1");
+        }
+        Ok(())
     }
 }
 
@@ -54,6 +68,7 @@ pub struct Recorder {
     clock: FrameClock,
     mode: CaptureMode,
     stop_after: f32,
+    alpha: bool,
     path: PathBuf,
     started: Instant,
     frames: u64,
@@ -71,6 +86,7 @@ impl Recorder {
         canvas: (u32, u32),
         rate: FrameRate,
     ) -> Result<Self> {
+        settings.check()?;
         if staging_bytes(canvas) > device.limits().max_buffer_size {
             bail!(
                 "{}×{} is too large to record on this GPU; choose a smaller canvas",
@@ -89,6 +105,7 @@ impl Recorder {
             clock: FrameClock::new(rate),
             mode: settings.mode,
             stop_after: settings.stop_after,
+            alpha: settings.alpha,
             path,
             started: Instant::now(),
             frames: 0,
@@ -99,6 +116,11 @@ impl Recorder {
 
     pub fn mode(&self) -> CaptureMode {
         self.mode
+    }
+
+    /// Whether frames are captured with a transparent background.
+    pub fn alpha(&self) -> bool {
+        self.alpha
     }
 
     /// Call once per screen refresh, before drawing its canvas frames: hands frames that
@@ -237,5 +259,23 @@ mod tests {
         }
         assert_eq!((frames, dropped), (1, 2));
         assert_eq!(spare, [vec![1; 4], vec![2; 4]]);
+    }
+
+    #[test]
+    fn only_formats_with_an_alpha_channel_record_alpha() {
+        let alpha = |format| RecordSettings {
+            format,
+            alpha: true,
+            ..RecordSettings::default()
+        };
+        let err = alpha(VideoFormat::Hevc).check().unwrap_err();
+        assert!(format!("{err:#}").contains("HEVC can't carry alpha"));
+        assert!(alpha(VideoFormat::Ffv1).check().is_ok());
+        assert!(alpha(VideoFormat::ProRes4444).check().is_ok());
+        assert!(
+            RecordSettings::default().check().is_ok(),
+            "opaque HEVC records"
+        );
+        assert!(!RecordSettings::default().alpha, "alpha starts off");
     }
 }

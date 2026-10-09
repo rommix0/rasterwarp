@@ -244,6 +244,23 @@ fn capture_section(ui: &mut Ui, capture: &mut CaptureUi, actions: &mut UiActions
                             ui.selectable_value(&mut settings.format, format, format.label());
                         }
                     });
+                // A checked box stays enabled under HEVC so it can be turned off again.
+                let alpha_ok = settings.format.carries_alpha();
+                ui.add_enabled(
+                    alpha_ok || settings.alpha,
+                    egui::Checkbox::new(&mut settings.alpha, "Transparent background (alpha)"),
+                )
+                .on_hover_text(
+                    "Recordings and stills leave the background out: keyed levels are                      see-through, for compositing over other video",
+                );
+                if !alpha_ok {
+                    let note = "HEVC can't carry alpha; choose ProRes 4444 or FFV1";
+                    if settings.alpha {
+                        ui.colored_label(egui::Color32::YELLOW, note);
+                    } else {
+                        ui.small(note);
+                    }
+                }
                 ComboBox::from_id_salt("capture mode")
                     .selected_text(settings.mode.label())
                     .show_ui(ui, |ui| {

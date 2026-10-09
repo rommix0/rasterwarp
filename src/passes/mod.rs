@@ -315,12 +315,15 @@ impl Renderer {
                 area.size(),
                 self.composite.encode_srgb(),
                 self.background_aspect,
+                false,
             ),
         );
     }
 
     /// Draws the current canvas frame's composite into `output`: a canvas-sized texture
-    /// in [`CAPTURE_FORMAT`], with no letterboxing and no UI.
+    /// in [`CAPTURE_FORMAT`], with no letterboxing and no UI. With `alpha`, the background
+    /// is left out and keyed levels are see-through, in straight (not premultiplied) alpha.
+    #[allow(clippy::too_many_arguments)]
     pub fn composite_capture(
         &self,
         device: &wgpu::Device,
@@ -328,6 +331,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameParams,
         time: f32,
+        alpha: bool,
         output: &wgpu::TextureView,
     ) {
         self.capture.render(
@@ -346,6 +350,7 @@ impl Renderer {
                 self.size,
                 self.capture.encode_srgb(),
                 self.background_aspect,
+                alpha,
             ),
         );
     }

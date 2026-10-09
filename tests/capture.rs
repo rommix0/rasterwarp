@@ -35,15 +35,52 @@ fn pattern(index: i64) -> Vec<u8> {
     rgba
 }
 
+/// `pattern` with see-through parts: the left quarter is clear (and black, as straight
+/// alpha leaves it), the next quarter half-transparent.
+fn pattern_with_alpha(index: i64) -> Vec<u8> {
+    let mut rgba = pattern(index);
+    let (pixels, _) = rgba.as_chunks_mut::<4>();
+    for (i, px) in pixels.iter_mut().enumerate() {
+        let x = i % SIZE.0 as usize;
+        if x < SIZE.0 as usize / 4 {
+            *px = [0, 0, 0, 0];
+        } else if x < SIZE.0 as usize / 2 {
+            px[3] = 128;
+        }
+    }
+    rgba
+}
+
 fn encode(path: &Path, format: VideoFormat, rate: FrameRate) -> anyhow::Result<u64> {
+    encode_frames(path, format, rate, pattern)
+}
+
+fn encode_frames(
+    path: &Path,
+    format: VideoFormat,
+    rate: FrameRate,
+    frame: fn(i64) -> Vec<u8>,
+) -> anyhow::Result<u64> {
     let encoder = Encoder::start(path, format, SIZE, rate)?;
     for pts in 0..FRAMES {
         encoder.send(Frame {
             pts,
-            rgba: pattern(pts),
+            rgba: frame(pts),
         })?;
     }
     encoder.finish()
+}
+
+/// The pixel format `path`'s video stream is coded in.
+fn coded_format(path: &Path) -> ff::format::Pixel {
+    ff::init().unwrap();
+    let input = ff::format::input(path).expect("open the recording");
+    let stream = input
+        .streams()
+        .best(ff::media::Type::Video)
+        .expect("a video stream");
+    let context = ff::codec::context::Context::from_parameters(stream.parameters()).unwrap();
+    context.decoder().video().unwrap().format()
 }
 
 /// Decodes every frame of `path` to tightly packed RGBA (BT.709 for YUV input), checking
@@ -72,7 +109,10 @@ fn decode(path: &Path, rate: FrameRate) -> Vec<(u32, u32, Vec<u8>)> {
         ff::software::scaling::Flags::BILINEAR,
     )
     .unwrap();
-    if decoder.format() == ff::format::Pixel::YUV444P {
+    if matches!(
+        decoder.format(),
+        ff::format::Pixel::YUV444P | ff::format::Pixel::YUVA444P12LE
+    ) {
         // SAFETY: valid scaler pointer; FFmpeg's coefficient tables are static.
         unsafe {
             let bt709 = ff::ffi::sws_getCoefficients(ff::ffi::SWS_CS_ITU709);
@@ -174,4 +214,44 @@ fn an_existing_file_is_not_overwritten() {
         .expect("start must fail");
     assert!(format!("{err:#}").contains("already exists"));
     assert_eq!(std::fs::read(&path).unwrap(), b"keep me");
+}
+
+#[test]
+fn ffv1_keeps_alpha_exactly() {
+    let path = temp_file("ffv1-alpha", "mkv");
+    let rate = FrameRate::default();
+    let written = encode_frames(&path, VideoFormat::Ffv1, rate, pattern_with_alpha);
+    assert_eq!(written.expect("encode"), 30);
+    let frames = decode(&path, rate);
+    assert!(
+        frames[7].2 == pattern_with_alpha(7),
+        "frame 7 differs from what was recorded"
+    );
+}
+
+#[test]
+fn prores_4444_keeps_alpha() {
+    let path = temp_file("prores", "mov");
+    let rate = FrameRate::default();
+    let written = encode_frames(&path, VideoFormat::ProRes4444, rate, pattern_with_alpha);
+    assert_eq!(written.expect("encode"), 30);
+    // The decoder hands ProRes 4444 out at 12 bits; what matters is the alpha plane.
+    assert_eq!(coded_format(&path), ff::format::Pixel::YUVA444P12LE);
+    let frames = decode(&path, rate);
+    assert_eq!(frames.len(), FRAMES as usize);
+    let (w, h, rgba) = &frames[7];
+    assert_eq!((*w, *h), SIZE);
+    let source = pattern_with_alpha(7);
+    let (got, _) = rgba.as_chunks::<4>();
+    let (want, _) = source.as_chunks::<4>();
+    let mut error = 0u64;
+    for (g, s) in got.iter().zip(want) {
+        assert!(g[3].abs_diff(s[3]) <= 1, "alpha {} for {}", g[3], s[3]);
+        if s[3] == 255 {
+            error += (0..3).map(|c| u64::from(g[c].abs_diff(s[c]))).sum::<u64>();
+        }
+    }
+    let opaque = want.iter().filter(|s| s[3] == 255).count() as f64 * 3.0;
+    let mean = error as f64 / opaque;
+    assert!(mean < 3.0, "mean error {mean:.2} per channel");
 }

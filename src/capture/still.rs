@@ -12,7 +12,7 @@ pub fn file_name(now: chrono::NaiveDateTime) -> String {
     format!("rasterwarp-{}.png", now.format("%Y%m%d-%H%M%S"))
 }
 
-/// RGB from RGBA: the canvas is opaque, so the alpha channel is dropped.
+/// RGB from RGBA, for an opaque still: the alpha channel is dropped.
 pub fn rgb(rgba: &[u8]) -> Vec<u8> {
     let (pixels, _) = rgba.as_chunks::<4>();
     pixels.iter().flat_map(|px| [px[0], px[1], px[2]]).collect()
@@ -39,24 +39,29 @@ pub fn grab(
 }
 
 /// Saves `rgba` (`size` pixels) as a PNG in `folder`, named for `now`, without replacing
-/// an earlier still. Returns where it went.
+/// an earlier still: RGBA with `alpha`, otherwise RGB. Returns where it went.
 pub fn save(
     folder: &Path,
     now: chrono::NaiveDateTime,
     size: (u32, u32),
     rgba: &[u8],
+    alpha: bool,
 ) -> Result<PathBuf> {
     std::fs::create_dir_all(folder)
         .with_context(|| format!("could not create {}", folder.display()))?;
     let path = unused_path(folder, &file_name(now));
-    image::save_buffer(
-        &path,
-        &rgb(rgba),
-        size.0,
-        size.1,
-        image::ExtendedColorType::Rgb8,
-    )
-    .with_context(|| format!("could not save {}", path.display()))?;
+    let saved = if alpha {
+        image::save_buffer(&path, rgba, size.0, size.1, image::ExtendedColorType::Rgba8)
+    } else {
+        image::save_buffer(
+            &path,
+            &rgb(rgba),
+            size.0,
+            size.1,
+            image::ExtendedColorType::Rgb8,
+        )
+    };
+    saved.with_context(|| format!("could not save {}", path.display()))?;
     Ok(path)
 }
 
@@ -87,8 +92,8 @@ mod tests {
         // Two 2×1 frames: red then green, and blue then white.
         let first = [255, 0, 0, 255, 0, 255, 0, 255];
         let second = [0, 0, 255, 255, 255, 255, 255, 255];
-        let a = save(&folder, at_nine(), (2, 1), &first).unwrap();
-        let b = save(&folder, at_nine(), (2, 1), &second).unwrap();
+        let a = save(&folder, at_nine(), (2, 1), &first, false).unwrap();
+        let b = save(&folder, at_nine(), (2, 1), &second, false).unwrap();
         assert_eq!(a, folder.join("rasterwarp-20261007-090503.png"));
         assert_eq!(b, folder.join("rasterwarp-20261007-090503-2.png"));
         let image = image::open(&a).unwrap().to_rgb8();
@@ -96,5 +101,16 @@ mod tests {
         assert_eq!(image.as_raw(), &[255, 0, 0, 0, 255, 0]);
         let image = image::open(&b).unwrap().to_rgb8();
         assert_eq!(image.as_raw(), &[0, 0, 255, 255, 255, 255]);
+        assert!(!image::open(&a).unwrap().color().has_alpha());
+    }
+
+    #[test]
+    fn transparent_stills_keep_their_alpha() {
+        let folder = crate::save::temp_dir("alpha-stills").join("captures");
+        let rgba = [255, 0, 0, 255, 0, 0, 0, 0];
+        let path = save(&folder, at_nine(), (2, 1), &rgba, true).unwrap();
+        let image = image::open(&path).unwrap();
+        assert!(image.color().has_alpha());
+        assert_eq!(image.to_rgba8().as_raw(), &rgba);
     }
 }

@@ -392,6 +392,7 @@ mod tests {
         settings.capture.format = crate::capture::encode::VideoFormat::Ffv1;
         settings.capture.mode = crate::capture::CaptureMode::Offline;
         settings.capture.stop_after = 12.5;
+        settings.capture.alpha = true;
         save_settings(&dir, &settings).unwrap();
         assert_eq!(load_settings(&dir), settings);
         fs::write(dir.join(SETTINGS_FILE), "{ broken").unwrap();
@@ -435,7 +436,10 @@ mod tests {
             strings(&["live", "transition", "sequence"])
         );
         assert_eq!(names(CaptureMode::ALL), strings(&["real-time", "offline"]));
-        assert_eq!(names(VideoFormat::ALL), strings(&["hevc", "ffv1"]));
+        assert_eq!(
+            names(VideoFormat::ALL),
+            strings(&["hevc", "ffv1", "prores-4444"])
+        );
         assert_eq!(
             names([CurveRef::Linear, CurveRef::SCurve, CurveRef::Custom(3)]),
             strings(&["linear", "s-curve", "custom:3"])

@@ -22,20 +22,29 @@ pub enum VideoFormat {
     Hevc,
     /// FFV1 lossless RGB in Matroska, on the CPU.
     Ffv1,
+    /// ProRes 4444 with an alpha channel in QuickTime, on the CPU: what editors and
+    /// compositors read.
+    ProRes4444,
 }
 
 saved_names!(VideoFormat {
     Hevc => "hevc",
     Ffv1 => "ffv1",
+    ProRes4444 => "prores-4444",
 });
 
 impl VideoFormat {
-    pub const ALL: [VideoFormat; 2] = [VideoFormat::Hevc, VideoFormat::Ffv1];
+    pub const ALL: [VideoFormat; 3] = [
+        VideoFormat::Hevc,
+        VideoFormat::Ffv1,
+        VideoFormat::ProRes4444,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             VideoFormat::Hevc => "HEVC NVENC 4:4:4, near-lossless",
             VideoFormat::Ffv1 => "FFV1 lossless, may drop frames above 720p",
+            VideoFormat::ProRes4444 => "ProRes 4444 with alpha, may drop frames at 1080p60",
         }
     }
 
@@ -43,11 +52,21 @@ impl VideoFormat {
         match self {
             VideoFormat::Hevc => "mp4",
             VideoFormat::Ffv1 => "mkv",
+            VideoFormat::ProRes4444 => "mov",
+        }
+    }
+
+    /// Whether the file keeps the canvas's alpha channel.
+    pub fn carries_alpha(self) -> bool {
+        match self {
+            VideoFormat::Hevc => false,
+            VideoFormat::Ffv1 | VideoFormat::ProRes4444 => true,
         }
     }
 }
 
-/// One captured frame: tightly packed sRGB RGBA rows, `width × height × 4` bytes.
+/// One captured frame: tightly packed sRGB RGBA rows, `width × height × 4` bytes, with
+/// straight (not premultiplied) alpha.
 pub struct Frame {
     /// Presentation time in frames at the recording's frame rate.
     pub pts: i64,
@@ -187,7 +206,7 @@ fn run(
 
 /// How captured RGBA becomes the encoder's pixel format.
 enum Convert {
-    /// RGBA → YUV 4:4:4 with BT.709 coefficients (HEVC).
+    /// RGBA → YUV 4:4:4 with BT.709 coefficients (HEVC; ProRes keeps the alpha too).
     Scale {
         scaler: scaling::Context,
         rgba: frame::Video,
@@ -216,6 +235,7 @@ impl Sink {
         let (codec_name, pixel) = match format {
             VideoFormat::Hevc => ("hevc_nvenc", format::Pixel::YUV444P),
             VideoFormat::Ffv1 => ("ffv1", format::Pixel::BGRA),
+            VideoFormat::ProRes4444 => ("prores_ks", format::Pixel::YUVA444P10LE),
         };
         let codec = encoder::find_by_name(codec_name)
             .ok_or_else(|| anyhow!("this FFmpeg build has no {codec_name} encoder"))?;
@@ -237,14 +257,14 @@ impl Sink {
         setup.set_gop(rate.keyframe_interval());
         setup.set_max_b_frames(0);
         let mut options = Dictionary::new();
+        if format != VideoFormat::Ffv1 {
+            setup.set_colorspace(ff::util::color::Space::BT709);
+            setup.set_color_range(ff::util::color::Range::MPEG);
+            setup.set_color_primaries(ff::util::color::Primaries::BT709);
+            setup.set_color_transfer_characteristic(ff::util::color::TransferCharacteristic::BT709);
+        }
         match format {
             VideoFormat::Hevc => {
-                setup.set_colorspace(ff::util::color::Space::BT709);
-                setup.set_color_range(ff::util::color::Range::MPEG);
-                setup.set_color_primaries(ff::util::color::Primaries::BT709);
-                setup.set_color_transfer_characteristic(
-                    ff::util::color::TransferCharacteristic::BT709,
-                );
                 for (key, value) in [
                     ("preset", "p4"),
                     ("tune", "hq"),
@@ -270,6 +290,20 @@ impl Sink {
                     options.set(key, value);
                 }
             }
+            VideoFormat::ProRes4444 => {
+                // Each frame is coded on its own, so frame threads keep every core busy.
+                setup.set_threading(codec::threading::Config {
+                    kind: codec::threading::Type::Frame,
+                    count: 0,
+                });
+                for (key, value) in [
+                    ("profile", "4444"),
+                    ("alpha_bits", "16"),
+                    ("vendor", "apl0"),
+                ] {
+                    options.set(key, value);
+                }
+            }
         }
         if global_header {
             setup.set_flags(codec::Flags::GLOBAL_HEADER);
@@ -280,6 +314,7 @@ impl Sink {
                  NVENC and a free encode session. Try FFV1 instead."
             ),
             VideoFormat::Ffv1 => anyhow!("could not open the FFV1 encoder ({err})"),
+            VideoFormat::ProRes4444 => anyhow!("could not open the ProRes encoder ({err})"),
         })?;
         stream.set_parameters(&encoder);
         stream.set_time_base(time_base);
@@ -297,7 +332,7 @@ impl Sink {
         let stream_time_base = output.stream(0).context("no video stream")?.time_base();
 
         let convert = match format {
-            VideoFormat::Hevc => {
+            VideoFormat::Hevc | VideoFormat::ProRes4444 => {
                 let mut scaler = scaling::Context::get(
                     format::Pixel::RGBA,
                     width,

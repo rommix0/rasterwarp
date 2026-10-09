@@ -135,6 +135,10 @@ mod tests {
             file_name(t, VideoFormat::Ffv1),
             "rasterwarp-20261007-090503.mkv"
         );
+        assert_eq!(
+            file_name(t, VideoFormat::ProRes4444),
+            "rasterwarp-20261007-090503.mov"
+        );
     }
 
     #[test]

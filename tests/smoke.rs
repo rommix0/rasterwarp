@@ -227,7 +227,7 @@ fn grabs_a_still_of_the_whole_canvas() {
     renderer.render_canvas(&device, &queue, &mut encoder, &frame_params, 0.5);
     queue.submit([encoder.finish()]);
     let rgba = still::grab(&device, &queue, renderer.size(), |encoder, view| {
-        renderer.composite_capture(&device, &queue, encoder, &frame_params, 0.5, view)
+        renderer.composite_capture(&device, &queue, encoder, &frame_params, 0.5, false, view)
     })
     .expect("grab a still");
     assert_eq!(rgba.len(), (canvas.0 * canvas.1 * 4) as usize);
@@ -251,6 +251,7 @@ fn records_every_frame_offline() {
         mode: CaptureMode::Offline,
         folder: folder.clone(),
         stop_after: 0.5,
+        alpha: false,
     };
     let canvas = (256, 144);
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -280,6 +281,7 @@ fn records_every_frame_offline() {
                     encoder,
                     &frame_params,
                     time as f32,
+                    false,
                     view,
                 )
             })
@@ -307,6 +309,7 @@ fn offline_capture_waits_for_the_gpu_instead_of_dropping() {
         mode: CaptureMode::Offline,
         folder: folder.clone(),
         stop_after: 0.0,
+        alpha: false,
     };
     let canvas = (256, 144);
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -336,6 +339,7 @@ fn offline_capture_waits_for_the_gpu_instead_of_dropping() {
                     encoder,
                     &frame_params,
                     time as f32,
+                    false,
                     view,
                 )
             })
@@ -362,6 +366,7 @@ fn real_time_capture_waits_for_the_gpu_when_the_ring_is_full() {
         mode: CaptureMode::RealTime,
         folder,
         stop_after: 0.0,
+        alpha: false,
     };
     let canvas = (256, 144);
     let format = wgpu::TextureFormat::Rgba8Unorm;
@@ -393,6 +398,7 @@ fn real_time_capture_waits_for_the_gpu_when_the_ring_is_full() {
                     encoder,
                     &frame_params,
                     time as f32,
+                    false,
                     view,
                 )
             })
@@ -856,6 +862,77 @@ fn keyed_levels_show_the_background_after_clearing_trails() {
         "the keyed dark level still shows the red background after clearing trails"
     );
     assert_eq!(px(200), [255, 255, 255], "the white level stays");
+}
+
+/// Draws one canvas frame of the keying setup and grabs the capture composite.
+fn grab_keyed(setup: &mut KeyingSetup, params: &Params, alpha: bool) -> Vec<u8> {
+    let KeyingSetup {
+        device,
+        queue,
+        renderer,
+        ..
+    } = setup;
+    let frame = FrameParams::at_rest(params);
+    let mut encoder = device.create_command_encoder(&Default::default());
+    renderer.render_canvas(device, queue, &mut encoder, &frame, 0.0);
+    queue.submit([encoder.finish()]);
+    still::grab(device, queue, renderer.size(), |encoder, view| {
+        renderer.composite_capture(device, queue, encoder, &frame, 0.0, alpha, view)
+    })
+    .expect("grab the capture composite")
+}
+
+#[test]
+fn alpha_capture_leaves_the_background_out() {
+    let Some(mut setup) = setup_keying_test() else {
+        return;
+    };
+    let (size, params) = (setup.size, setup.params);
+    let px = |pixels: &[u8], x: u32| {
+        let i = ((size.1 / 2 * size.0 + x) * 4) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+    };
+    let opaque = grab_keyed(&mut setup, &params, false);
+    assert_eq!(
+        px(&opaque, 40),
+        [255, 0, 0, 255],
+        "opaque: the background shows"
+    );
+    let clear = grab_keyed(&mut setup, &params, true);
+    assert_eq!(
+        px(&clear, 40),
+        [0, 0, 0, 0],
+        "the keyed level is see-through"
+    );
+    assert_eq!(
+        px(&clear, 200),
+        [255, 255, 255, 255],
+        "the white level stays"
+    );
+    let (pixels, _) = clear.as_chunks::<4>();
+    assert!(
+        pixels.iter().all(|p| p[3] == 0 || p[0] > 200),
+        "no red background anywhere"
+    );
+}
+
+#[test]
+fn glow_over_see_through_parts_is_partly_opaque() {
+    let Some(mut setup) = setup_keying_test() else {
+        return;
+    };
+    let size = setup.size;
+    let mut params = setup.params;
+    params.glow.bloom_intensity = 2.0;
+    params.glow.bloom_threshold = 0.5;
+    let clear = grab_keyed(&mut setup, &params, true);
+    let alpha = |x: u32| clear[((size.1 / 2 * size.0 + x) * 4 + 3) as usize];
+    let near = alpha(size.0 / 2 - 4);
+    assert!(
+        near > 0 && near < 255,
+        "glow just outside the white level is partly opaque, alpha {near}"
+    );
+    assert_eq!(alpha(200), 255, "the white level stays opaque");
 }
 
 /// Frame `k` of a test clip: flat gray at `levels[k]`.

@@ -997,12 +997,14 @@ impl State {
         let (device, queue, renderer) = (&self.device, &self.queue, &self.renderer);
         let (frame_params, time) = (&self.frame_params, self.time as f32);
         let size = renderer.size();
+        let settings = &self.ui.capture.settings;
+        let alpha = settings.alpha;
         let saved = still::grab(device, queue, size, |encoder, view| {
-            renderer.composite_capture(device, queue, encoder, frame_params, time, view)
+            renderer.composite_capture(device, queue, encoder, frame_params, time, alpha, view)
         })
         .and_then(|rgba| {
             let now = chrono::Local::now().naive_local();
-            still::save(&self.ui.capture.settings.folder, now, size, &rgba)
+            still::save(&settings.folder, now, size, &rgba, alpha)
         });
         // Reading back and encoding a large frame stalls; that must not make canvas
         // frames late.
@@ -1160,8 +1162,9 @@ impl State {
         {
             let (device, queue, renderer) = (&self.device, &self.queue, &self.renderer);
             let (frame_params, time) = (&self.frame_params, self.time as f32);
+            let alpha = recorder.alpha();
             let captured = recorder.capture(device, &mut encoder, |encoder, view| {
-                renderer.composite_capture(device, queue, encoder, frame_params, time, view)
+                renderer.composite_capture(device, queue, encoder, frame_params, time, alpha, view)
             });
             if let Err(err) = captured {
                 log::warn!("{err:#}");
