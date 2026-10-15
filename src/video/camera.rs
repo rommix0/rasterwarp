@@ -56,9 +56,18 @@ pub fn list() -> Result<Vec<String>> {
         }
         for i in 0..(*list).nb_devices.max(0) as usize {
             let device = *(*list).devices.add(i);
+            // Some devices report no media types, with a null pointer, and some have no
+            // description; neither can be read, so they're skipped.
+            if device.is_null()
+                || (*device).media_types.is_null()
+                || (*device).nb_media_types <= 0
+                || (*device).device_description.is_null()
+            {
+                continue;
+            }
             let types = std::slice::from_raw_parts(
                 (*device).media_types,
-                (*device).nb_media_types.max(0) as usize,
+                (*device).nb_media_types as usize,
             );
             if types.contains(&AVMediaType::AVMEDIA_TYPE_VIDEO) {
                 let name = std::ffi::CStr::from_ptr((*device).device_description);
