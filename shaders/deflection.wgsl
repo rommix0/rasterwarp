@@ -1,6 +1,7 @@
 // Deflection shared by the warp and raster passes: summed oscillators, the global
-// transform with its wandering rotation axis, and line timing jitter. Positions are in
-// frame heights, centered: y spans [-0.5, 0.5], x spans [-aspect/2, aspect/2].
+// transform with its wandering rotation axis and pseudo-3D tilt, and line timing jitter.
+// Positions are in frame heights, centered: y spans [-0.5, 0.5] (down), x spans
+// [-aspect/2, aspect/2].
 
 struct Osc {
     mode: vec4<u32>, // waveform, target (0 = X, 1 = Y), input (0 = U, 1 = V, 2 = radius, 3 = time), oscillator index
@@ -14,6 +15,8 @@ struct Deflection {
     source_size: vec4<f32>, // source width, height in frame units, unused, unused
     look: vec4<f32>,        // line jitter (frame heights), axis wander, unused, unused
     seed: vec4<u32>,        // line jitter seed (animation frame count), unused, unused, unused
+    tilt: mat3x3<f32>,      // the tilt (src/tilt.rs): flat position to homogeneous screen position
+    untilt: mat3x3<f32>,    // its inverse; all zeros while the plane is edge-on
     osc: array<Osc, 8>,
 };
 
@@ -68,17 +71,28 @@ fn pivot(w: Deflection) -> vec2<f32> {
 }
 
 // The global transform, inverse direction: deflected frame position to source frame
-// position (the warp pass's sampling map).
+// position (the warp pass's sampling map). The tilt comes off first; a position that
+// sees no plane (past its horizon, or all of it while edge-on) maps far outside the
+// source.
 fn to_source(w: Deflection, s: vec2<f32>) -> vec2<f32> {
+    let h = w.untilt * vec3<f32>(s, 1.0);
+    if h.z <= 0.0 {
+        return vec2<f32>(1e9);
+    }
     let c = pivot(w);
-    return (rotate2(s - c, w.transform.y) + c) / w.transform.x - w.transform.zw;
+    return (rotate2(h.xy / h.z - c, w.transform.y) + c) / w.transform.x - w.transform.zw;
 }
 
 // The global transform, forward direction: source frame position to frame position (the
-// raster pass's beam map). Exactly undoes `to_source`.
-fn from_source(w: Deflection, q: vec2<f32>) -> vec2<f32> {
+// raster pass's beam map), tilt last, with the depth scale it was divided by: at or
+// below 0 the position is behind the eye. Exactly undoes `to_source`.
+fn from_source(w: Deflection, q: vec2<f32>) -> vec3<f32> {
     let c = pivot(w);
-    return rotate2((q + w.transform.zw) * w.transform.x - c, -w.transform.y) + c;
+    let r = rotate2((q + w.transform.zw) * w.transform.x - c, -w.transform.y) + c;
+    let h = w.tilt * vec3<f32>(r, 1.0);
+    // Nudged off 0 so a position on the horizon stays finite.
+    let depth = select(h.z, 1e-6, abs(h.z) < 1e-6);
+    return vec3<f32>(h.xy / depth, depth);
 }
 
 // PCG integer hash.

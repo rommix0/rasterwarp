@@ -131,6 +131,9 @@ pub struct OscSlot {
 pub struct WarpFrame {
     pub zoom: f32,
     pub rotation: f32,
+    pub tilt_x: f32,
+    pub tilt_y: f32,
+    pub perspective: f32,
     pub offset: [f32; 2],
     pub drift: f32,
     pub oscillators: Vec<OscSlot>,
@@ -304,6 +307,9 @@ pub fn blend(
         warp: WarpFrame {
             zoom: lerp_in(a.zoom, b.zoom, t, ranges::ZOOM),
             rotation: lerp_in(a.rotation, b.rotation, t, ranges::ROTATION),
+            tilt_x: lerp_in(a.tilt_x, b.tilt_x, t, ranges::TILT),
+            tilt_y: lerp_in(a.tilt_y, b.tilt_y, t, ranges::TILT),
+            perspective: lerp_in(a.perspective, b.perspective, t, ranges::PERSPECTIVE),
             offset: [
                 lerp_in(a.offset[0], b.offset[0], t, ranges::OFFSET),
                 lerp_in(a.offset[1], b.offset[1], t, ranges::OFFSET),
@@ -481,6 +487,7 @@ mod tests {
         b.colorize.ringing = 0.6;
         b.warp.line_jitter = 4.0;
         b.warp.axis_wander = 0.55;
+        (b.warp.tilt_x, b.warp.tilt_y, b.warp.perspective) = (1.0, -2.0, 0.9);
         b.raster.enabled = true;
         b.raster.lines = 200;
         b.raster.beam_width = 2.2;
@@ -493,6 +500,9 @@ mod tests {
         assert!((early.colorize.ringing - 0.3).abs() < 1e-6);
         assert!((early.warp.line_jitter - 1.0).abs() < 1e-6);
         assert!((early.warp.axis_wander - 0.25).abs() < 1e-6);
+        assert!((early.warp.tilt_x - 0.25).abs() < 1e-6);
+        assert!((early.warp.tilt_y + 0.5).abs() < 1e-6);
+        assert!((early.warp.perspective - 0.6).abs() < 1e-6);
         assert!((early.raster.beam_width - 1.45).abs() < 1e-6);
         assert_eq!((early.raster.enabled, early.raster.lines), (false, 600));
         assert_eq!(early.key, a.key);

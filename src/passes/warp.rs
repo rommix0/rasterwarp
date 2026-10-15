@@ -5,6 +5,7 @@ use bytemuck::{Pod, Zeroable};
 use crate::blend::{MAX_SLOTS, OscSlot, WarpFrame};
 use crate::gpu::{FullscreenPass, INTERNAL_FORMAT, PassDesc, RenderTarget};
 use crate::params::{Axis, OscInput, Waveform};
+use crate::tilt::{self, Tilt};
 
 /// Matches `struct Osc` in deflection.wgsl.
 #[repr(C)]
@@ -24,6 +25,9 @@ pub struct WarpUniforms {
     pub source_size: [f32; 4],
     pub look: [f32; 4],
     pub seed: [u32; 4],
+    /// The tilt's projective map and its inverse, as `mat3x3<f32>` columns.
+    pub tilt: [[f32; 4]; 3],
+    pub untilt: [[f32; 4]; 3],
     pub osc: [OscUniform; MAX_SLOTS],
 }
 
@@ -56,6 +60,7 @@ pub fn uniforms(
 ) -> WarpUniforms {
     let fit = source_fit(frame_aspect, source_aspect);
     let count = w.oscillators.len().min(MAX_SLOTS);
+    let t = Tilt::new(w.tilt_x, w.tilt_y, w.perspective);
     let mut osc = [OscUniform::zeroed(); MAX_SLOTS];
     for (dst, slot) in osc.iter_mut().zip(&w.oscillators) {
         *dst = osc_uniform(slot);
@@ -71,6 +76,8 @@ pub fn uniforms(
             0.0,
         ],
         seed: [w.seed, 0, 0, 0],
+        tilt: tilt::columns(&t.forward),
+        untilt: tilt::columns(&t.back),
         osc,
     }
 }
@@ -163,9 +170,10 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // Osc = 3 x vec4 = 48 bytes; Deflection = 5 x vec4 + 8 x Osc = 464 bytes.
+        // Osc = 3 x vec4 = 48 bytes; Deflection = 5 x vec4 + 2 x mat3x3 (3 padded
+        // columns each) + 8 x Osc = 560 bytes.
         assert_eq!(size_of::<OscUniform>(), 48);
-        assert_eq!(size_of::<WarpUniforms>(), 464);
+        assert_eq!(size_of::<WarpUniforms>(), 560);
     }
 
     #[test]
@@ -218,8 +226,25 @@ mod tests {
         let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 800, 1.0);
         assert_eq!(u.look, [0.005, 0.6, 0.0, 0.0]);
         assert_eq!(u.seed, [77, 0, 0, 0]);
+        // No tilt: the identity both ways.
+        let identity = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+        ];
+        assert_eq!((u.tilt, u.untilt), (identity, identity));
         // A quarter-size renderer: 4 canvas pixels are 1 of its 200 pixels, still 0.005.
         let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 200, 0.25);
         assert_eq!(u.look[0], 0.005);
+    }
+
+    #[test]
+    fn packs_the_tilt_both_ways() {
+        let mut frame = FrameParams::at_rest(&Params::default());
+        (frame.warp.tilt_x, frame.warp.tilt_y, frame.warp.perspective) = (0.4, -0.3, 0.7);
+        let u = uniforms(&frame.warp, 0.0, 16.0 / 9.0, 1.0, 800, 1.0);
+        let t = Tilt::new(0.4, -0.3, 0.7);
+        assert_eq!(u.tilt, tilt::columns(&t.forward));
+        assert_eq!(u.untilt, tilt::columns(&t.back));
     }
 }

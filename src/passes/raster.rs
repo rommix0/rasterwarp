@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn uniform_layout_matches_wgsl() {
-        // Two Deflection structs (464 bytes each) and two vec4s.
-        assert_eq!(size_of::<RasterUniforms>(), 960);
+        // Two Deflection structs (560 bytes each) and two vec4s.
+        assert_eq!(size_of::<RasterUniforms>(), 1152);
     }
 
     #[test]

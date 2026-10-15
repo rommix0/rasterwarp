@@ -687,6 +687,9 @@ fn warp_section(ui: &mut Ui, params: &mut Params, links: &mut Links) {
             for (id, text) in [
                 (SliderId::Zoom, "zoom"),
                 (SliderId::Rotation, "rotation"),
+                (SliderId::TiltX, "tilt x"),
+                (SliderId::TiltY, "tilt y"),
+                (SliderId::Perspective, "perspective"),
                 (SliderId::OffsetX, "offset x"),
                 (SliderId::OffsetY, "offset y"),
                 (SliderId::Drift, "analog drift"),

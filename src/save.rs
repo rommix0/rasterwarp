@@ -283,6 +283,7 @@ mod tests {
         let w = &mut p.warp;
         (w.zoom, w.rotation, w.offset, w.drift) = (2.5, -1.0, [0.25, -0.5], 0.7);
         (w.slave_4_to_3, w.line_jitter, w.axis_wander) = (true, 3.0, 0.4);
+        (w.tilt_x, w.tilt_y, w.perspective) = (0.8, -1.2, 0.3);
         let c = &mut p.colorize;
         (c.levels, c.softness, c.cycle_speed, c.bypass) = (4, 0.3, 1.5, true);
         for (i, color) in c.palette.iter_mut().enumerate() {
@@ -495,6 +496,10 @@ mod tests {
         assert!(!loaded.newer);
         let p = loaded.value;
         assert_eq!(p.warp.zoom, 2.5);
+        assert_eq!(
+            (p.warp.tilt_x, p.warp.tilt_y, p.warp.perspective),
+            (0.0, 0.0, 0.5)
+        );
         assert_eq!(p.warp.oscillators[0].waveform, Waveform::Square);
         assert_eq!(p.warp.oscillators[3].envelope, Envelope::Swell);
         assert_eq!(p.colorize.levels, 4);

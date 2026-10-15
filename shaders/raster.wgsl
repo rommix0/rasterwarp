@@ -20,10 +20,11 @@ struct BeamOut {
     @location(2) gain: f32,       // area and speed compensation
 };
 
-// Where the beam for source frame position q lands, before line jitter.
-fn deflected(w: Deflection, q: vec2<f32>) -> vec2<f32> {
+// Where the beam for source frame position q lands, before line jitter, with the tilt's
+// depth scale (at or below 0 behind the eye).
+fn deflected(w: Deflection, q: vec2<f32>) -> vec3<f32> {
     let s = from_source(w, q);
-    return s + displacement(w, s);
+    return vec3<f32>(s.xy + displacement(w, s.xy), s.z);
 }
 
 @vertex
@@ -36,25 +37,26 @@ fn vs_beam(@builtin(vertex_index) vi: u32, @builtin(instance_index) line: u32) -
     let side = select(-1.0, 1.0, (vi & 1u) == 1u);
     let v = (f32(line) + 0.5) / lines;
     let q = (vec2<f32>(u, v) - 0.5) * size;
-    let centre = deflected(r.now, q);
+    let at = deflected(r.now, q);
+    let centre = at.xy;
 
     // The line's direction, from its neighbouring samples.
     let du = vec2<f32>(size.x / samples, 0.0);
-    let along = deflected(r.now, q + du) - deflected(r.now, q - du);
+    let along = deflected(r.now, q + du).xy - deflected(r.now, q - du).xy;
     let len = length(along);
     let normal = select(vec2<f32>(0.0, 1.0), vec2<f32>(-along.y, along.x) / len, len > 1e-8);
 
     // Area compensation: lines spread apart brighten, packed lines dim, measured as the
     // distance to the next line across this one against the undeflected spacing.
     let rest = size.y / lines;
-    let next = deflected(r.now, q + vec2<f32>(0.0, rest));
+    let next = deflected(r.now, q + vec2<f32>(0.0, rest)).xy;
     let spacing = abs(dot(next - centre, normal)) / rest;
     let area = mix(1.0, spacing, r.beam.z);
 
     // Speed compensation: fast-moving beams brighten so fast sweeps don't fade. Speed is
     // in frame heights per second since the previous canvas frame (none while paused).
     let dt = r.now.frame.x - r.before.frame.x;
-    let moved = length(centre - deflected(r.before, q));
+    let moved = length(centre - deflected(r.before, q).xy);
     let speed = select(0.0, moved / dt, dt > 0.0);
     let boost = 1.0 + r.beam.w * min(speed / 0.5, 4.0);
 
@@ -67,7 +69,9 @@ fn vs_beam(@builtin(vertex_index) vi: u32, @builtin(instance_index) line: u32) -
 
     var out: BeamOut;
     let aspect = r.now.frame.y;
-    out.pos = vec4<f32>(p.x / (0.5 * aspect), -2.0 * p.y, 0.0, 1.0);
+    // Scaled back up by the depth, so the GPU clips away what lies behind the eye.
+    let depth = at.z;
+    out.pos = vec4<f32>(p.x / (0.5 * aspect) * depth, -2.0 * p.y * depth, 0.0, depth);
     out.suv = vec2<f32>(u, v);
     out.across = side;
     // A beam narrower than a pixel is drawn a pixel wide and dimmed to match.

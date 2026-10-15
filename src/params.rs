@@ -21,6 +21,8 @@ pub mod ranges {
     pub const LFO_DEPTH: RangeInclusive<f32> = 0.0..=1.0;
     pub const ZOOM: RangeInclusive<f32> = 0.1..=4.0;
     pub const ROTATION: RangeInclusive<f32> = -PI..=PI;
+    pub const TILT: RangeInclusive<f32> = -PI..=PI;
+    pub const PERSPECTIVE: RangeInclusive<f32> = 0.0..=1.0;
     pub const OFFSET: RangeInclusive<f32> = -1.0..=1.0;
     pub const DRIFT: RangeInclusive<f32> = 0.0..=1.0;
     pub const LEVELS: RangeInclusive<u32> = 2..=8;
@@ -193,6 +195,12 @@ pub struct WarpParams {
     pub zoom: f32,
     /// Radians.
     pub rotation: f32,
+    /// Radians the source tips about the screen's horizontal axis, top away first.
+    pub tilt_x: f32,
+    /// Radians the source turns about the screen's vertical axis, right side away first.
+    pub tilt_y: f32,
+    /// How deep the tilt looks: 0 squashes flat, 1 puts the eye a frame height away.
+    pub perspective: f32,
     /// Frame heights.
     pub offset: [f32; 2],
     /// Slow random wobble of oscillator frequency and phase.
@@ -500,6 +508,9 @@ impl Default for Params {
                 ],
                 zoom: 1.0,
                 rotation: 0.0,
+                tilt_x: 0.0,
+                tilt_y: 0.0,
+                perspective: 0.5,
                 offset: [0.0, 0.0],
                 drift: 0.2,
                 slave_4_to_3: false,
@@ -612,6 +623,9 @@ impl Params {
         }
         clamp(&mut w.zoom, ranges::ZOOM);
         clamp(&mut w.rotation, ranges::ROTATION);
+        clamp(&mut w.tilt_x, ranges::TILT);
+        clamp(&mut w.tilt_y, ranges::TILT);
+        clamp(&mut w.perspective, ranges::PERSPECTIVE);
         for v in &mut w.offset {
             clamp(v, ranges::OFFSET);
         }
@@ -742,6 +756,9 @@ mod tests {
         }
         assert!(ranges::ZOOM.contains(&p.warp.zoom));
         assert!(ranges::ROTATION.contains(&p.warp.rotation));
+        assert!(ranges::TILT.contains(&p.warp.tilt_x));
+        assert!(ranges::TILT.contains(&p.warp.tilt_y));
+        assert!(ranges::PERSPECTIVE.contains(&p.warp.perspective));
         assert!(p.warp.offset.iter().all(|v| ranges::OFFSET.contains(v)));
         assert!(ranges::DRIFT.contains(&p.warp.drift));
         assert!(ranges::LEVELS.contains(&p.colorize.levels));
@@ -820,6 +837,8 @@ mod tests {
         assert_eq!(Params::default().clamped(), Params::default());
         let mut p = Params::default();
         p.warp.zoom = 99.0;
+        p.warp.tilt_x = 9.0;
+        p.warp.perspective = -1.0;
         p.warp.oscillators[2].frequency = -5.0;
         p.colorize.levels = 50;
         p.colorize.palette[3][1] = 2.0;
@@ -827,6 +846,7 @@ mod tests {
         p.key.levels = 0xff;
         let p = p.clamped();
         assert_eq!(p.warp.zoom, 4.0);
+        assert_eq!((p.warp.tilt_x, p.warp.perspective), (PI, 0.0));
         assert_eq!(p.warp.oscillators[2].frequency, 0.0);
         assert_eq!(p.colorize.levels, 8);
         assert_eq!(p.colorize.palette[3][1], 1.0);
